@@ -133,7 +133,7 @@ describe('password login blocking', function () {
         $user = User::create([
             'name' => 'OAuth User',
             'email' => 'oauth@example.com',
-            'password' => bcrypt('password'),
+            'password' => Hash::make('password'),
             'oauth_provider' => 'github',
             'password_login_disabled' => true,
         ]);
@@ -150,7 +150,7 @@ describe('password login blocking', function () {
         $user = User::create([
             'name' => 'Regular User',
             'email' => 'regular@example.com',
-            'password' => bcrypt('password'),
+            'password' => Hash::make('password'),
             'oauth_provider' => null,
             'password_login_disabled' => false,
         ]);
