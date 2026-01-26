@@ -162,3 +162,93 @@ describe('password login blocking', function () {
         expect(Auth::user()->email)->toBe('regular@example.com');
     });
 });
+
+describe('password reset and update blocking', function () {
+    test('OAuth user cannot reset password', function () {
+        $user = User::create([
+            'name' => 'OAuth User',
+            'email' => 'oauth@example.com',
+            'password' => bcrypt('oldpassword'),
+            'oauth_provider' => 'github',
+            'password_login_disabled' => true,
+        ]);
+
+        // Simulate password reset flow
+        $token = \Illuminate\Support\Facades\Password::createToken($user);
+        
+        $response = $this->post('/reset-password', [
+            'token' => $token,
+            'email' => 'oauth@example.com',
+            'password' => 'newpassword',
+            'password_confirmation' => 'newpassword',
+        ]);
+
+        // Should have validation error
+        $response->assertSessionHasErrors(['email']);
+    });
+
+    test('regular user can reset password', function () {
+        $user = User::create([
+            'name' => 'Regular User',
+            'email' => 'regular@example.com',
+            'password' => bcrypt('oldpassword'),
+            'oauth_provider' => null,
+            'password_login_disabled' => false,
+        ]);
+
+        // Simulate password reset flow
+        $token = \Illuminate\Support\Facades\Password::createToken($user);
+        
+        $response = $this->post('/reset-password', [
+            'token' => $token,
+            'email' => 'regular@example.com',
+            'password' => 'newpassword123',
+            'password_confirmation' => 'newpassword123',
+        ]);
+
+        // Should redirect on success
+        $response->assertRedirect();
+    });
+
+    test('OAuth user cannot update password while logged in', function () {
+        $user = User::create([
+            'name' => 'OAuth User',
+            'email' => 'oauth@example.com',
+            'password' => bcrypt('oldpassword'),
+            'oauth_provider' => 'github',
+            'password_login_disabled' => true,
+        ]);
+
+        $this->actingAs($user);
+
+        $response = $this->put('/user/password', [
+            'current_password' => 'oldpassword',
+            'password' => 'newpassword',
+            'password_confirmation' => 'newpassword',
+        ]);
+
+        // Should have validation error
+        $response->assertSessionHasErrors(['current_password']);
+    });
+
+    test('regular user can update password while logged in', function () {
+        $user = User::create([
+            'name' => 'Regular User',
+            'email' => 'regular@example.com',
+            'password' => bcrypt('oldpassword'),
+            'oauth_provider' => null,
+            'password_login_disabled' => false,
+        ]);
+
+        $this->actingAs($user);
+
+        $response = $this->put('/user/password', [
+            'current_password' => 'oldpassword',
+            'password' => 'newpassword123',
+            'password_confirmation' => 'newpassword123',
+        ]);
+
+        // Should be successful
+        $response->assertSessionHasNoErrors();
+    });
+});
