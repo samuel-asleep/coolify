@@ -16,11 +16,30 @@
                 <div class="pb-4">Advanced settings for your Coolify instance.</div>
 
                 <div class="flex flex-col gap-1">
+                    <h4>Registration Settings</h4>
                     <div class="md:w-96">
                         <x-forms.checkbox instantSave id="is_registration_enabled"
-                            helper="Allow users to self-register. If disabled, only administrators can create accounts."
-                            label="Registration Allowed" />
+                            helper="Allow users to self-register with username and password. If disabled, only administrators can create accounts."
+                            label="Allow Standard Registration" />
                     </div>
+                    <div class="md:w-96">
+                        <x-forms.checkbox instantSave id="is_oauth_registration_enabled"
+                            helper="Allow new users to register via OAuth providers (e.g., GitHub, Google, Authentik) even when standard registration is disabled. This is useful for controlling access through your OAuth provider's organization settings."
+                            label="Allow OAuth Registration" />
+                    </div>
+                    <div class="md:w-96">
+                        <x-forms.checkbox instantSave id="enforce_oauth_only"
+                            helper="Force OAuth users to authenticate only via their OAuth provider. When enabled, users who registered via OAuth cannot set or use passwords, and must always log in through their OAuth provider. This allows centralized user suspension through your OAuth provider."
+                            label="Enforce OAuth-Only Authentication" />
+                    </div>
+                    @if ($enforce_oauth_only)
+                        <x-callout type="info" title="OAuth-Only Mode Active" class="mt-2">
+                            Users who registered via OAuth providers will be unable to use password-based authentication. 
+                            They must log in through their OAuth provider. This allows you to control access centrally 
+                            (e.g., suspend a user in Authentik to block their access to all Coolify instances).
+                        </x-callout>
+                    @endif
+                    <h4 class="pt-4">Privacy Settings</h4>
                     <div class="md:w-96">
                         <x-forms.checkbox instantSave id="do_not_track"
                             helper="Opt out of reporting this instance to coolify.io's installation count. No other data is collected."
