@@ -5,6 +5,8 @@ use App\Models\OauthSetting;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Password;
 use Laravel\Socialite\Facades\Socialite;
 use Mockery;
 
@@ -168,13 +170,13 @@ describe('password reset and update blocking', function () {
         $user = User::create([
             'name' => 'OAuth User',
             'email' => 'oauth@example.com',
-            'password' => bcrypt('oldpassword'),
+            'password' => Hash::make('oldpassword'),
             'oauth_provider' => 'github',
             'password_login_disabled' => true,
         ]);
 
         // Simulate password reset flow
-        $token = \Illuminate\Support\Facades\Password::createToken($user);
+        $token = Password::createToken($user);
         
         $response = $this->post('/reset-password', [
             'token' => $token,
@@ -191,13 +193,13 @@ describe('password reset and update blocking', function () {
         $user = User::create([
             'name' => 'Regular User',
             'email' => 'regular@example.com',
-            'password' => bcrypt('oldpassword'),
+            'password' => Hash::make('oldpassword'),
             'oauth_provider' => null,
             'password_login_disabled' => false,
         ]);
 
         // Simulate password reset flow
-        $token = \Illuminate\Support\Facades\Password::createToken($user);
+        $token = Password::createToken($user);
         
         $response = $this->post('/reset-password', [
             'token' => $token,
@@ -214,7 +216,7 @@ describe('password reset and update blocking', function () {
         $user = User::create([
             'name' => 'OAuth User',
             'email' => 'oauth@example.com',
-            'password' => bcrypt('oldpassword'),
+            'password' => Hash::make('oldpassword'),
             'oauth_provider' => 'github',
             'password_login_disabled' => true,
         ]);
@@ -235,7 +237,7 @@ describe('password reset and update blocking', function () {
         $user = User::create([
             'name' => 'Regular User',
             'email' => 'regular@example.com',
-            'password' => bcrypt('oldpassword'),
+            'password' => Hash::make('oldpassword'),
             'oauth_provider' => null,
             'password_login_disabled' => false,
         ]);

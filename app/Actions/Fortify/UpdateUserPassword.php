@@ -19,10 +19,9 @@ class UpdateUserPassword implements UpdatesUserPasswords
     {
         // Prevent password update for OAuth-only users
         if ($user->isPasswordLoginDisabled()) {
-            throw new \Illuminate\Validation\ValidationException(
-                Validator::make([], []),
-                ['current_password' => __('This account uses OAuth authentication. Password changes are not available.')]
-            );
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'current_password' => __('This account uses OAuth authentication. Password changes are not available.')
+            ]);
         }
 
         Validator::make($input, [

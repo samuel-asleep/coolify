@@ -19,10 +19,9 @@ class ResetUserPassword implements ResetsUserPasswords
     {
         // Prevent password reset for OAuth-only users
         if ($user->isPasswordLoginDisabled()) {
-            throw new \Illuminate\Validation\ValidationException(
-                Validator::make([], []),
-                ['email' => __('This account uses OAuth authentication. Password reset is not available.')]
-            );
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'email' => __('This account uses OAuth authentication. Password reset is not available.')
+            ]);
         }
 
         Validator::make($input, [
