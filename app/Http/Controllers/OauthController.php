@@ -34,12 +34,6 @@ class OauthController extends Controller
                     'oauth_provider' => $provider,
                     'password_login_disabled' => true,
                 ]);
-            } elseif ($user->isOAuthUser() && empty($user->oauth_provider)) {
-                // If user exists but doesn't have oauth_provider set, update it
-                $user->update([
-                    'oauth_provider' => $provider,
-                    'password_login_disabled' => true,
-                ]);
             }
             Auth::login($user);
 
