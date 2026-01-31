@@ -1,0 +1,76 @@
+name: Sync Coolify-docs (manual, no force push)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "Where to push Coolify-docs (owner/repo)"
+        required: true
+        default: "samuel-asleep/coolify-docs"
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the docs branch of the source repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: docs  # Target the `docs` branch from the source repository
+
+      - name: Read commit title from source repo
+        id: msg
+        run: |
+          echo "title=$(git log -1 --pretty=%s $GITHUB_SHA)" >> $GITHUB_OUTPUT
+
+      - name: Prepare Coolify-docs payload
+        run: |
+          rm -rf /tmp/payload
+          mkdir -p /tmp/payload
+          test -d ./Coolify-docs || (echo "ERROR: Expected ./Coolify-docs directory not found"; exit 1)
+          rsync -a --delete --exclude='.git' --exclude='.github' ./Coolify-docs/ /tmp/payload/
+
+      - name: Push to target repo (no force push)
+        env:
+          PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+          TARGET_BRANCH: "collabsio/coolify#8043"  # Targeting collabsio branch
+          COMMIT_TITLE: ${{ steps.msg.outputs.title }}
+        run: |
+          set -e
+
+          test -n "${PUSH_TOKEN}" || (echo "ERROR: PUSH_TOKEN secret is empty/missing"; exit 1)
+          test -n "${TARGET_REPO}" || (echo "ERROR: target_repo input is empty"; exit 1)
+          test -n "${TARGET_BRANCH}" || (echo "ERROR: LIBRETROSHARE_TARGET_BRANCH secret is empty/missing"; exit 1)
+
+          rm -rf /tmp/target
+          git clone "https://x-access-token:${PUSH_TOKEN}@github.com/${TARGET_REPO}.git" /tmp/target
+          cd /tmp/target
+
+          echo "PWD: $(pwd)"
+          ls -la
+          test -d .git || (echo "ERROR: .git not found in $(pwd)"; exit 1)
+
+          git config user.name "samuel-asleep"
+          git config user.email "benneu40@gmail.com"
+
+          if git ls-remote --exit-code --heads origin "${TARGET_BRANCH}" >/dev/null 2>&1; then
+            git fetch origin "${TARGET_BRANCH}"
+            git checkout -B "${TARGET_BRANCH}" "origin/${TARGET_BRANCH}"
+          else
+            git checkout -b "${TARGET_BRANCH}"
+          fi
+
+          rsync -a --delete --exclude='.git' --exclude='.git/**' --exclude='.github' --exclude='.github/**' /tmp/payload/ ./
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to sync."
+            exit 0
+          fi
+
+          git commit -m "${COMMIT_TITLE}"
+          git push origin "${TARGET_BRANCH}" 
