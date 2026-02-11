@@ -345,6 +345,7 @@ services:
               }
           }
     environment:
+      # Coolify will inject the service URL for this container
       - SERVICE_URL_NGINX_80
     depends_on:
       - frontend
@@ -357,3 +358,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+
+volumes:
+  pgdata:
+  clickhouse:
+  redisdata:
+  miniodata:
+  shared-volume:
