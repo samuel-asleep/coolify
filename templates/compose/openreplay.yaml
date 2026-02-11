@@ -1,0 +1,359 @@
+# documentation: https://openreplay.com
+# slogan: Session replay and analytics you can self-host. OpenReplay is an open-source alternative to FullStory, LogRocket and Hotjar.
+# category: analytics
+# tags: session,replay,analytics,monitoring,self-hosted,observability
+# logo: svgs/openreplay.svg
+# port: 80
+
+services:
+  postgresql:
+    image: ghcr.io/openreplay/postgres:14.5.0
+    volumes:
+      - pgdata:/bitnami/postgresql
+    environment:
+      - POSTGRES_PASSWORD=$SERVICE_PASSWORD_POSTGRES
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.11.1.2711
+    volumes:
+      - clickhouse:/var/lib/clickhouse
+    environment:
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: ghcr.io/openreplay/valkey:7.2.5
+    volumes:
+      - redisdata:/bitnami/redis/data
+    environment:
+      - ALLOW_EMPTY_PASSWORD=yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  minio:
+    image: ghcr.io/openreplay/minio:RELEASE.2023-11-20T22-40-07Z
+    volumes:
+      - miniodata:/bitnami/minio/data
+    environment:
+      - MINIO_ROOT_USER=${SERVICE_PASSWORD_MINIOUSER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${SERVICE_PASSWORD_MINIO}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  alerts:
+    image: public.ecr.aws/p1t3u8a3/alerts:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - POSTGRES_URL=postgresql://postgres:$SERVICE_PASSWORD_POSTGRES@postgresql:5432/postgres
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    image: public.ecr.aws/p1t3u8a3/api:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - POSTGRES_URL=postgresql://postgres:$SERVICE_PASSWORD_POSTGRES@postgresql:5432/postgres
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  http:
+    image: public.ecr.aws/p1t3u8a3/http:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - POSTGRES_URL=postgresql://postgres:$SERVICE_PASSWORD_POSTGRES@postgresql:5432/postgres
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  images:
+    image: public.ecr.aws/p1t3u8a3/images:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - MINIO_HOST=minio
+      - MINIO_PORT=9000
+      - MINIO_ACCESS_KEY=${SERVICE_PASSWORD_MINIOUSER:-minioadmin}
+      - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  integrations:
+    image: public.ecr.aws/p1t3u8a3/integrations:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - POSTGRES_URL=postgresql://postgres:$SERVICE_PASSWORD_POSTGRES@postgresql:5432/postgres
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  sink:
+    image: public.ecr.aws/p1t3u8a3/sink:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - POSTGRES_URL=postgresql://postgres:$SERVICE_PASSWORD_POSTGRES@postgresql:5432/postgres
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=9000
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+  sourcemapreader:
+    image: public.ecr.aws/p1t3u8a3/sourcemapreader:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - MINIO_HOST=minio
+      - MINIO_PORT=9000
+      - MINIO_ACCESS_KEY=${SERVICE_PASSWORD_MINIOUSER:-minioadmin}
+      - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  spot:
+    image: public.ecr.aws/p1t3u8a3/spot:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - POSTGRES_URL=postgresql://postgres:$SERVICE_PASSWORD_POSTGRES@postgresql:5432/postgres
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  storage:
+    image: public.ecr.aws/p1t3u8a3/storage:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - MINIO_HOST=minio
+      - MINIO_PORT=9000
+      - MINIO_ACCESS_KEY=${SERVICE_PASSWORD_MINIOUSER:-minioadmin}
+      - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  assets:
+    image: public.ecr.aws/p1t3u8a3/assets:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - MINIO_HOST=minio
+      - MINIO_PORT=9000
+      - MINIO_ACCESS_KEY=${SERVICE_PASSWORD_MINIOUSER:-minioadmin}
+      - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  assist:
+    image: public.ecr.aws/p1t3u8a3/assist:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - POSTGRES_URL=postgresql://postgres:$SERVICE_PASSWORD_POSTGRES@postgresql:5432/postgres
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  canvases:
+    image: public.ecr.aws/p1t3u8a3/canvases:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - POSTGRES_URL=postgresql://postgres:$SERVICE_PASSWORD_POSTGRES@postgresql:5432/postgres
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  chalice:
+    image: public.ecr.aws/p1t3u8a3/chalice:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - POSTGRES_URL=postgresql://postgres:$SERVICE_PASSWORD_POSTGRES@postgresql:5432/postgres
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: public.ecr.aws/p1t3u8a3/db:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - POSTGRES_URL=postgresql://postgres:$SERVICE_PASSWORD_POSTGRES@postgresql:5432/postgres
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ender:
+    image: public.ecr.aws/p1t3u8a3/ender:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - POSTGRES_URL=postgresql://postgres:$SERVICE_PASSWORD_POSTGRES@postgresql:5432/postgres
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=9000
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    image: public.ecr.aws/p1t3u8a3/frontend:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - API_URL=http://api:8080
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  heuristics:
+    image: public.ecr.aws/p1t3u8a3/heuristics:${OPENREPLAY_VERSION:-latest}
+    volumes:
+      - shared-volume:/mnt/efs
+    environment:
+      - POSTGRES_URL=postgresql://postgres:$SERVICE_PASSWORD_POSTGRES@postgresql:5432/postgres
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=9000
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    volumes:
+      - type: bind
+        source: ./volumes/nginx/nginx.conf
+        target: /etc/nginx/conf.d/default.conf
+        content: |
+          upstream frontend {
+              server frontend:80;
+          }
+          
+          upstream api {
+              server api:8080;
+          }
+          
+          upstream http {
+              server http:8080;
+          }
+
+          server {
+              listen 80;
+              server_name _;
+              
+              location / {
+                  proxy_pass http://frontend;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+              
+              location /api/ {
+                  proxy_pass http://api/;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+              
+              location /ingest/ {
+                  proxy_pass http://http/;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+              
+              location /ws-assist/ {
+                  proxy_pass http://assist:9001/;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+    environment:
+      - SERVICE_URL_NGINX_80
+    depends_on:
+      - frontend
+      - api
+      - http
+      - assist
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
