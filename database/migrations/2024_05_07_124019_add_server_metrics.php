@@ -11,6 +11,10 @@ return new class extends Migration
      */
     public function up(): void
     {
+        if (Schema::hasColumn('servers', 'is_metrics_enabled')) {
+            return;
+        }
+
         Schema::table('servers', function (Blueprint $table) {
             $table->boolean('is_metrics_enabled')->default(true);
         });
@@ -21,6 +25,10 @@ return new class extends Migration
      */
     public function down(): void
     {
+        if (! Schema::hasColumn('servers', 'is_metrics_enabled')) {
+            return;
+        }
+
         Schema::table('servers', function (Blueprint $table) {
             $table->dropColumn('is_metrics_enabled');
         });
