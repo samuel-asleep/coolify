@@ -171,7 +171,7 @@ If connection fails:
 
 View logs to diagnose:
 ```bash
-docker-compose -f docker-compose.external.yml logs coolify
+docker compose -f docker-compose.external.yml logs coolify
 ```
 
 Common issues:

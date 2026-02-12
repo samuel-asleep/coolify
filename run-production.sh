@@ -29,11 +29,11 @@ COMMAND=${1:-up}
 case "$COMMAND" in
     up)
         echo "Building and starting Coolify..."
-        docker-compose -f docker-compose.external.yml up --build
+        docker compose -f docker-compose.external.yml up --build
         ;;
     up-detached|up-d)
         echo "Building and starting Coolify in detached mode..."
-        docker-compose -f docker-compose.external.yml up --build -d
+        docker compose -f docker-compose.external.yml up --build -d
         echo ""
         echo "✓ Coolify is starting in the background"
         echo "  View logs with: $0 logs"
@@ -41,48 +41,48 @@ case "$COMMAND" in
         ;;
     down)
         echo "Stopping Coolify..."
-        docker-compose -f docker-compose.external.yml down
+        docker compose -f docker-compose.external.yml down
         ;;
     restart)
         echo "Restarting Coolify..."
-        docker-compose -f docker-compose.external.yml restart
+        docker compose -f docker-compose.external.yml restart
         ;;
     logs)
-        docker-compose -f docker-compose.external.yml logs -f
+        docker compose -f docker-compose.external.yml logs -f
         ;;
     ps)
-        docker-compose -f docker-compose.external.yml ps
+        docker compose -f docker-compose.external.yml ps
         ;;
     exec)
         echo "Opening shell in Coolify container..."
-        docker-compose -f docker-compose.external.yml exec coolify sh
+        docker compose -f docker-compose.external.yml exec coolify sh
         ;;
     migrate)
         echo "Running database migrations..."
-        docker-compose -f docker-compose.external.yml exec coolify php artisan migrate --force
+        docker compose -f docker-compose.external.yml exec coolify php artisan migrate --force
         ;;
     key:generate)
         echo "Generating new APP_KEY..."
-        docker-compose -f docker-compose.external.yml exec coolify php artisan key:generate --show
+        docker compose -f docker-compose.external.yml exec coolify php artisan key:generate --show
         ;;
     cache:clear)
         echo "Clearing cache..."
-        docker-compose -f docker-compose.external.yml exec coolify php artisan cache:clear
-        docker-compose -f docker-compose.external.yml exec coolify php artisan config:clear
-        docker-compose -f docker-compose.external.yml exec coolify php artisan route:clear
-        docker-compose -f docker-compose.external.yml exec coolify php artisan view:clear
+        docker compose -f docker-compose.external.yml exec coolify php artisan cache:clear
+        docker compose -f docker-compose.external.yml exec coolify php artisan config:clear
+        docker compose -f docker-compose.external.yml exec coolify php artisan route:clear
+        docker compose -f docker-compose.external.yml exec coolify php artisan view:clear
         ;;
     test-db)
         echo "Testing database connection..."
-        docker-compose -f docker-compose.external.yml exec coolify php artisan db:show
+        docker compose -f docker-compose.external.yml exec coolify php artisan db:show
         ;;
     test-redis)
         echo "Testing Redis connection..."
-        docker-compose -f docker-compose.external.yml exec coolify php artisan tinker --execute="Redis::ping()"
+        docker compose -f docker-compose.external.yml exec coolify php artisan tinker --execute="Redis::ping()"
         ;;
     build)
         echo "Building Docker image..."
-        docker-compose -f docker-compose.external.yml build
+        docker compose -f docker-compose.external.yml build
         ;;
     help)
         echo "Usage: $0 [command]"
