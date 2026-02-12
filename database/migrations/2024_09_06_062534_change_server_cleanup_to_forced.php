@@ -1,8 +1,8 @@
 <?php
 
-use App\Models\ServerSetting;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
@@ -12,17 +12,20 @@ return new class extends Migration
      */
     public function up(): void
     {
+        if (! Schema::hasColumn('server_settings', 'force_docker_cleanup')) {
+            return;
+        }
+
         Schema::table('server_settings', function (Blueprint $table) {
             $table->boolean('force_docker_cleanup')->default(true)->change();
         });
-        $serverSettings = ServerSetting::all();
-        foreach ($serverSettings as $serverSetting) {
-            if ($serverSetting->force_docker_cleanup === false) {
-                $serverSetting->force_docker_cleanup = true;
-                $serverSetting->docker_cleanup_frequency = '*/10 * * * *';
-                $serverSetting->save();
-            }
-        }
+
+        DB::table('server_settings')
+            ->where('force_docker_cleanup', false)
+            ->update([
+                'force_docker_cleanup' => true,
+                'docker_cleanup_frequency' => '*/10 * * * *',
+            ]);
     }
 
     /**
@@ -30,6 +33,10 @@ return new class extends Migration
      */
     public function down(): void
     {
+        if (! Schema::hasColumn('server_settings', 'force_docker_cleanup')) {
+            return;
+        }
+
         Schema::table('server_settings', function (Blueprint $table) {
             $table->boolean('force_docker_cleanup')->default(false)->change();
         });
