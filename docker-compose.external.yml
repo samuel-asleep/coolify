@@ -1,0 +1,112 @@
+version: '3.8'
+
+services:
+  coolify:
+    build:
+      context: .
+      dockerfile: docker/production/Dockerfile
+      args:
+        - SERVERSIDEUP_PHP_VERSION=8.4-fpm-nginx-alpine
+        - MINIO_VERSION=RELEASE.2025-05-21T01-59-54Z
+        - CLOUDFLARED_VERSION=2025.7.0
+        - POSTGRES_VERSION=18
+        - USER_ID=9999
+        - GROUP_ID=9999
+    ports:
+      - "${APP_PORT:-8000}:8080"
+    environment:
+      - APP_ENV=${APP_ENV:-production}
+      - APP_NAME=${APP_NAME:-Coolify}
+      - APP_KEY=${APP_KEY}
+      - APP_URL=${APP_URL:-http://localhost:8000}
+      - APP_DEBUG=${APP_DEBUG:-false}
+      - APP_ID=${APP_ID:-production}
+      - SSH_MUX_ENABLED=${SSH_MUX_ENABLED:-true}
+      
+      # Database - External Neon PostgreSQL
+      - DATABASE_URL=${DATABASE_URL}
+      - DB_CONNECTION=${DB_CONNECTION:-pgsql}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_DATABASE=${DB_DATABASE}
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      
+      # Redis - External Upstash Redis
+      - REDIS_URL=${REDIS_URL}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDIS_USERNAME=${REDIS_USERNAME:-default}
+      
+      # Queue
+      - QUEUE_CONNECTION=${QUEUE_CONNECTION:-redis}
+      
+      # Pusher/Soketi
+      - PUSHER_APP_ID=${PUSHER_APP_ID}
+      - PUSHER_APP_KEY=${PUSHER_APP_KEY}
+      - PUSHER_APP_SECRET=${PUSHER_APP_SECRET}
+      
+      # Session & Cache
+      - SESSION_DRIVER=${SESSION_DRIVER:-redis}
+      - CACHE_DRIVER=${CACHE_DRIVER:-redis}
+      
+      # PHP Configuration
+      - PHP_MEMORY_LIMIT=${PHP_MEMORY_LIMIT:-256M}
+      - PHP_FPM_PM_CONTROL=${PHP_FPM_PM_CONTROL:-dynamic}
+      - PHP_FPM_PM_START_SERVERS=${PHP_FPM_PM_START_SERVERS:-1}
+      - PHP_FPM_PM_MIN_SPARE_SERVERS=${PHP_FPM_PM_MIN_SPARE_SERVERS:-1}
+      - PHP_FPM_PM_MAX_SPARE_SERVERS=${PHP_FPM_PM_MAX_SPARE_SERVERS:-10}
+      
+      # Mail
+      - MAIL_MAILER=${MAIL_MAILER:-log}
+      - MAIL_FROM_ADDRESS=${MAIL_FROM_ADDRESS:-hello@coolify.io}
+      - MAIL_FROM_NAME=${MAIL_FROM_NAME:-Coolify}
+      
+      # Registry
+      - REGISTRY_URL=${REGISTRY_URL:-ghcr.io}
+    volumes:
+      - coolify-ssh:/var/www/html/storage/app/ssh
+      - coolify-applications:/var/www/html/storage/app/applications
+      - coolify-databases:/var/www/html/storage/app/databases
+      - coolify-services:/var/www/html/storage/app/services
+      - coolify-backups:/var/www/html/storage/app/backups
+      - coolify-logs:/var/www/html/storage/logs
+    healthcheck:
+      test: curl --fail http://127.0.0.1:8080/api/health || exit 1
+      interval: 10s
+      retries: 10
+      timeout: 5s
+      start_period: 30s
+
+  soketi:
+    image: 'ghcr.io/coollabsio/coolify-realtime:1.0.10'
+    ports:
+      - "${SOKETI_PORT:-6001}:6001"
+      - "6002:6002"
+    environment:
+      - APP_NAME=${APP_NAME:-Coolify}
+      - SOKETI_DEBUG=${SOKETI_DEBUG:-false}
+      - SOKETI_DEFAULT_APP_ID=${PUSHER_APP_ID}
+      - SOKETI_DEFAULT_APP_KEY=${PUSHER_APP_KEY}
+      - SOKETI_DEFAULT_APP_SECRET=${PUSHER_APP_SECRET}
+    healthcheck:
+      test: [ "CMD-SHELL", "wget -qO- http://127.0.0.1:6001/ready && wget -qO- http://127.0.0.1:6002/ready || exit 1" ]
+      interval: 10s
+      retries: 10
+      timeout: 5s
+      start_period: 15s
+
+volumes:
+  coolify-ssh:
+    name: coolify-ssh
+  coolify-applications:
+    name: coolify-applications
+  coolify-databases:
+    name: coolify-databases
+  coolify-services:
+    name: coolify-services
+  coolify-backups:
+    name: coolify-backups
+  coolify-logs:
+    name: coolify-logs
