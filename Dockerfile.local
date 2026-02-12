@@ -1,0 +1,28 @@
+FROM serversideup/php:8.4-fpm-nginx-alpine
+
+USER root
+
+WORKDIR /var/www/html
+
+RUN apk add --no-cache \
+    bash \
+    curl \
+    git \
+    nodejs \
+    npm \
+    postgresql16 \
+    postgresql16-client \
+    redis \
+    su-exec
+
+COPY --chown=www-data:www-data . /var/www/html
+COPY --chmod=755 docker/development/entrypoint-local.sh /usr/local/bin/entrypoint-local.sh
+
+RUN mkdir -p /var/lib/postgresql/data /var/run/postgresql /var/lib/redis && \
+    chown -R postgres:postgres /var/lib/postgresql /var/run/postgresql && \
+    chown -R redis:redis /var/lib/redis && \
+    chown -R www-data:www-data /var/www/html
+
+EXPOSE 8000 5432 6379
+
+ENTRYPOINT ["/usr/local/bin/entrypoint-local.sh"]
