@@ -36,14 +36,33 @@ class CreateNewUser implements CreatesNewUsers
 
         if (User::count() == 0) {
             // If this is the first user, make them the root user
-            // Team is already created in the database/seeders/ProductionSeeder.php
-            $user = User::create([
-                'id' => 0,
-                'name' => $input['name'],
-                'email' => $input['email'],
-                'password' => Hash::make($input['password']),
-            ]);
-            $team = $user->teams()->first();
+            // The User model's boot() method will create Team with id=0 automatically
+            // But we need to check if Team 0 already exists (from seeding)
+            $existingTeam = \App\Models\Team::find(0);
+            
+            if ($existingTeam) {
+                // Team 0 already exists, create user without triggering team creation
+                $user = new User([
+                    'id' => 0,
+                    'name' => $input['name'],
+                    'email' => $input['email'],
+                    'password' => Hash::make($input['password']),
+                ]);
+                // Save without firing events to prevent duplicate team creation
+                $user->saveQuietly();
+                // Attach to existing team
+                $user->teams()->attach($existingTeam, ['role' => 'owner']);
+                $team = $existingTeam;
+            } else {
+                // No team exists, let the User model's boot() method create it
+                $user = User::create([
+                    'id' => 0,
+                    'name' => $input['name'],
+                    'email' => $input['email'],
+                    'password' => Hash::make($input['password']),
+                ]);
+                $team = $user->teams()->first();
+            }
 
             // Disable registration after first user is created
             $settings = instanceSettings();
