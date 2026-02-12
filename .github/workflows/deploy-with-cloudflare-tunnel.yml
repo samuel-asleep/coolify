@@ -1,0 +1,165 @@
+name: Deploy with Cloudflare Tunnel
+
+on:
+  workflow_dispatch:
+    inputs:
+      database_url:
+        description: 'PostgreSQL DATABASE_URL (e.g., postgresql://user:pass@host:5432/db)'
+        required: true
+        type: string
+      redis_url:
+        description: 'Redis REDIS_URL (e.g., redis://default:pass@host:6379 or rediss:// for TLS)'
+        required: true
+        type: string
+      cloudflare_tunnel_token:
+        description: 'Cloudflare Tunnel Token'
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Generate APP_KEY
+        id: generate-key
+        run: |
+          APP_KEY="base64:$(openssl rand -base64 32)"
+          echo "app_key=$APP_KEY" >> $GITHUB_OUTPUT
+      
+      - name: Create minimal .env file
+        run: |
+          cat > .env.production.custom << EOF
+          # Application Configuration
+          APP_ENV=production
+          APP_NAME=Coolify
+          APP_ID=production
+          APP_KEY=${{ steps.generate-key.outputs.app_key }}
+          APP_URL=https://coolify.tunnel.example.com
+          APP_PORT=8000
+          APP_DEBUG=false
+          SSH_MUX_ENABLED=true
+          
+          # Database Configuration
+          DATABASE_URL=${{ inputs.database_url }}
+          
+          # Redis Configuration
+          REDIS_URL=${{ inputs.redis_url }}
+          
+          # Queue Configuration
+          QUEUE_CONNECTION=redis
+          
+          # Pusher/Soketi Configuration (for real-time features)
+          PUSHER_APP_ID=coolify-app-id
+          PUSHER_APP_KEY=coolify-app-key
+          PUSHER_APP_SECRET=coolify-app-secret
+          SOKETI_DEBUG=false
+          SOKETI_PORT=6001
+          SOKETI_DEFAULT_APP_ID=coolify-app-id
+          SOKETI_DEFAULT_APP_KEY=coolify-app-key
+          SOKETI_DEFAULT_APP_SECRET=coolify-app-secret
+          
+          # Session & Cache Configuration
+          SESSION_DRIVER=redis
+          CACHE_DRIVER=redis
+          
+          # Mail Configuration
+          MAIL_MAILER=log
+          MAIL_FROM_ADDRESS=hello@coolify.io
+          MAIL_FROM_NAME=Coolify
+          
+          # Registry Configuration
+          REGISTRY_URL=ghcr.io
+          
+          # PHP Configuration
+          PHP_MEMORY_LIMIT=256M
+          PHP_FPM_PM_CONTROL=dynamic
+          PHP_FPM_PM_START_SERVERS=1
+          PHP_FPM_PM_MIN_SPARE_SERVERS=1
+          PHP_FPM_PM_MAX_SPARE_SERVERS=10
+          EOF
+          
+          echo "✅ Created .env.production.custom with DATABASE_URL and REDIS_URL"
+      
+      - name: Build Docker image
+        run: |
+          docker compose -f docker-compose.external.yml build
+      
+      - name: Start Coolify services
+        run: |
+          docker compose -f docker-compose.external.yml up -d
+          echo "Waiting for services to be healthy..."
+          sleep 30
+      
+      - name: Check service health
+        run: |
+          docker compose -f docker-compose.external.yml ps
+          
+          # Wait for health checks
+          echo "Checking Coolify health..."
+          for i in {1..30}; do
+            if curl -sf http://localhost:8000/api/health > /dev/null; then
+              echo "✅ Coolify is healthy!"
+              break
+            fi
+            echo "Waiting for Coolify to be healthy... ($i/30)"
+            sleep 2
+          done
+      
+      - name: Fix storage permissions
+        run: |
+          docker compose -f docker-compose.external.yml exec -T --user root coolify chown -R www-data:www-data /var/www/html/storage || true
+      
+      - name: Setup Cloudflare Tunnel
+        run: |
+          # Install cloudflared
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          
+          # Start tunnel in background
+          cloudflared tunnel --no-autoupdate run --token ${{ inputs.cloudflare_tunnel_token }} &
+          
+          echo "✅ Cloudflare Tunnel started"
+          echo "Your Coolify instance is now accessible via Cloudflare Tunnel"
+      
+      - name: Display connection info
+        run: |
+          echo "================================================"
+          echo "🎉 Coolify Deployment Complete!"
+          echo "================================================"
+          echo ""
+          echo "Services Status:"
+          docker compose -f docker-compose.external.yml ps
+          echo ""
+          echo "Local Access: http://localhost:8000"
+          echo "Tunnel Access: Check your Cloudflare dashboard for the public URL"
+          echo ""
+          echo "Health Check:"
+          curl -s http://localhost:8000/api/health
+          echo ""
+          echo "================================================"
+      
+      - name: Show logs
+        if: always()
+        run: |
+          echo "Coolify logs:"
+          docker compose -f docker-compose.external.yml logs coolify | tail -100
+      
+      - name: Keep workflow running
+        run: |
+          echo "Workflow will keep running to maintain the tunnel..."
+          echo "The deployment will stay active for the duration of this workflow run."
+          echo "To stop the deployment, cancel this workflow run."
+          
+          # Keep the workflow alive
+          while true; do
+            if ! curl -sf http://localhost:8000/api/health > /dev/null; then
+              echo "❌ Coolify health check failed!"
+              exit 1
+            fi
+            echo "✅ Coolify is running ($(date))"
+            sleep 60
+          done

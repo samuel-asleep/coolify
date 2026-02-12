@@ -8,21 +8,52 @@ This guide explains how to run Coolify using the production Dockerfile with exte
 - External PostgreSQL database (e.g., Neon)
 - External Redis instance (e.g., Upstash)
 
+## Deployment Options
+
+### Option 1: GitHub Actions with Cloudflare Tunnel (Automated)
+
+The easiest way to deploy is using the GitHub Actions workflow:
+
+1. Go to your repository's **Actions** tab
+2. Select **"Deploy with Cloudflare Tunnel"** workflow
+3. Click **"Run workflow"**
+4. Provide:
+   - `DATABASE_URL`: Your PostgreSQL connection string
+   - `REDIS_URL`: Your Redis connection string (use `rediss://` for TLS)
+   - `CLOUDFLARE_TUNNEL_TOKEN`: Your Cloudflare Tunnel token
+
+The workflow will:
+- Automatically generate APP_KEY
+- Create minimal .env with only DATABASE_URL and REDIS_URL
+- Build and start the application
+- Expose it via Cloudflare Tunnel
+- Keep running until you cancel the workflow
+
+### Option 2: Manual Deployment (Local)
+
 ## Quick Start
 
 ### 1. Configure Environment
 
-The `.env.production.custom` file has been created with your database and Redis credentials. Review and update as needed:
+Create a `.env.production.custom` file with your credentials. You can use the minimal template:
 
 ```bash
-# Edit configuration if needed
+# Copy the minimal example
+cp .env.external.example .env.production.custom
+
+# Edit with your actual credentials
 nano .env.production.custom
 ```
 
-**Important**: Make sure to update these values:
+**Minimal Required Configuration:**
+- `DATABASE_URL`: Your PostgreSQL connection string
+- `REDIS_URL`: Your Redis connection string
+
+**Optional but Recommended:**
+- `APP_KEY`: Generate with `openssl rand -base64 32`
+- `APP_URL`: Your actual domain or IP address
 - `ROOT_USER_EMAIL`: Your admin email
 - `ROOT_USER_PASSWORD`: A strong password for the admin account
-- `APP_URL`: Your actual domain or IP address
 
 ### 2. Start Coolify
 
