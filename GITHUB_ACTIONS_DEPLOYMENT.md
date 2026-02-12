@@ -1,6 +1,6 @@
 # Deploying Coolify with GitHub Actions and Cloudflare Tunnel
 
-This workflow allows you to deploy Coolify with external PostgreSQL and Redis using GitHub Actions, with automatic exposure via Cloudflare Tunnel.
+This workflow allows you to deploy Coolify with external PostgreSQL and Redis using GitHub Actions, with optional exposure via Cloudflare Tunnel.
 
 ## Prerequisites
 
@@ -10,7 +10,8 @@ This workflow allows you to deploy Coolify with external PostgreSQL and Redis us
 2. **External Redis Instance** (e.g., Upstash, Redis Cloud, or any Redis service)
    - Note the `REDIS_URL` in the format: `redis://default:password@host:6379` (or `rediss://` for TLS)
 
-3. **Cloudflare Tunnel Token**
+3. **Cloudflare Tunnel Token** (Optional)
+   - Only needed if you want public access via Cloudflare Tunnel
    - Go to [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/)
    - Navigate to **Networks** → **Tunnels**
    - Create a new tunnel
@@ -28,12 +29,14 @@ This workflow allows you to deploy Coolify with external PostgreSQL and Redis us
 
 1. Click on **"Deploy with Cloudflare Tunnel"**
 2. Click the **"Run workflow"** button
-3. Fill in the required inputs:
+3. Fill in the inputs:
 
    ```
+   branch: copilot/fix-dockerfile-errors (or any branch you want to deploy)
    database_url: postgresql://user:pass@host:5432/database?sslmode=require
    redis_url: rediss://default:pass@host:6379
-   cloudflare_tunnel_token: eyJh...your-token-here
+   reset_database: ☐ Check this to drop all tables and start fresh (useful for testing)
+   cloudflare_tunnel_token: (optional - leave empty for local-only deployment)
    ```
 
 4. Click **"Run workflow"** to start the deployment
@@ -41,30 +44,39 @@ This workflow allows you to deploy Coolify with external PostgreSQL and Redis us
 ### Step 3: Monitor the Deployment
 
 The workflow will:
-1. ✅ Checkout the code
+1. ✅ Checkout the specified branch
 2. ✅ Generate a secure `APP_KEY`
 3. ✅ Create a minimal `.env` file with only `DATABASE_URL` and `REDIS_URL`
 4. ✅ Build the Docker image
-5. ✅ Start Coolify and Soketi services
-6. ✅ Fix storage permissions
-7. ✅ Start Cloudflare Tunnel
-8. ✅ Display connection information
-9. ✅ Keep the deployment running
+5. ✅ Reset database (if requested)
+6. ✅ Start Coolify and Soketi services
+7. ✅ Fix storage permissions
+8. ✅ Run database migrations automatically
+9. ✅ Verify application is ready
+10. ✅ Start Cloudflare Tunnel (if token provided)
+11. ✅ Display connection information
+12. ✅ Keep the deployment running
 
 ### Step 4: Access Your Deployment
 
 Once the workflow completes:
 
-1. **Check Cloudflare Dashboard**
-   - Go to your Cloudflare Zero Trust dashboard
-   - Navigate to **Networks** → **Tunnels**
-   - Find your tunnel and see the public URL
+**With Cloudflare Tunnel:**
+1. Check Cloudflare Zero Trust dashboard
+2. Navigate to **Networks** → **Tunnels**
+3. Find your tunnel and see the public URL
+4. Open the public URL in your browser
 
-2. **Access Coolify**
-   - Open the public URL in your browser
-   - You'll see the Coolify registration page
-   - Create your admin account
-   - Start deploying applications!
+**Without Cloudflare Tunnel (Local Only):**
+- The application runs on the GitHub Actions runner
+- Primarily useful for testing the workflow
+- Not accessible from outside (no public URL)
+
+**Next Steps:**
+- Visit the registration page
+- Create your admin account
+- You'll be redirected to the dashboard
+- Start deploying applications!
 
 ## Stopping the Deployment
 
@@ -75,9 +87,37 @@ The deployment runs as long as the GitHub Actions workflow is active. To stop it
 3. Click on it
 4. Click **"Cancel workflow"**
 
-This will stop the Cloudflare Tunnel and shut down the Coolify services.
+This will stop the Cloudflare Tunnel (if running) and shut down the Coolify services.
 
 ## Configuration Details
+
+### New Features
+
+#### 1. Branch Selection
+- Deploy any branch from your repository
+- Default: `copilot/fix-dockerfile-errors`
+- Useful for testing different versions
+
+#### 2. Database Reset
+- Optional checkbox to reset the database before deployment
+- Drops all tables and recreates the schema
+- Useful for:
+  - Testing fresh installations
+  - Fixing corrupt database state
+  - Starting over after failed deployments
+- **Warning**: This deletes ALL data!
+
+#### 3. Automatic Database Setup
+- Workflow automatically runs `php artisan migrate --force` after startup
+- Creates all required tables including:
+  - `teams`, `users`, `email_notification_settings`
+  - All other Coolify tables
+- No manual migration needed!
+
+#### 4. Optional Cloudflare Tunnel
+- Cloudflare tunnel token is now optional
+- Leave empty for local-only testing
+- Provide token for public access
 
 ### Minimal Environment Variables
 
@@ -119,6 +159,24 @@ rediss://default:password@host:6379
 
 ## Troubleshooting
 
+### Missing table errors (e.g., "email_notification_settings does not exist")
+
+**Cause**: Database migrations haven't run yet or failed.
+
+**Solution**:
+1. Check the "Run database migrations" step in workflow logs
+2. If migrations failed, try running the workflow again with "Reset database" checked
+3. The workflow now automatically runs migrations, so this should be rare
+
+### Duplicate key errors during registration
+
+**Cause**: Team id=0 already exists in database from previous deployment.
+
+**Solution**:
+1. Run the workflow with "Reset database" checkbox enabled
+2. This will drop all tables and start fresh
+3. The code now handles this case, but reset ensures clean state
+
 ### Workflow fails at "Check service health"
 
 **Cause**: Services didn't start properly or health checks failed.
@@ -130,21 +188,23 @@ rediss://default:password@host:6379
 
 ### Cloudflare Tunnel not starting
 
-**Cause**: Invalid tunnel token.
+**Cause**: Invalid tunnel token or step is skipped.
 
 **Solution**:
-1. Verify your Cloudflare Tunnel token is correct
+1. Verify your Cloudflare Tunnel token is correct (if provided)
 2. Make sure the token hasn't expired
-3. Create a new tunnel in Cloudflare dashboard if needed
+3. The tunnel is optional - you can leave it empty for local testing
+4. Create a new tunnel in Cloudflare dashboard if needed
 
 ### Cannot access the public URL
 
-**Cause**: Tunnel might not be configured properly in Cloudflare.
+**Cause**: Tunnel might not be configured properly in Cloudflare, or token wasn't provided.
 
 **Solution**:
-1. Go to Cloudflare Zero Trust dashboard
-2. Check your tunnel's **Public Hostname** configuration
-3. Make sure it's routing to `http://localhost:8000`
+1. Make sure you provided a Cloudflare Tunnel token in the workflow
+2. Go to Cloudflare Zero Trust dashboard
+3. Check your tunnel's **Public Hostname** configuration
+4. Make sure it's routing to `http://localhost:8000`
 
 ### Database connection errors
 
