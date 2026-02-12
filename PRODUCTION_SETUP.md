@@ -210,6 +210,36 @@ Common issues:
 - Database migrations not run
 - Invalid environment variables
 
+### Duplicate Team Key Error During Registration
+
+**Symptom**: 
+```
+SQLSTATE[23505]: Unique violation: 7 ERROR: duplicate key value violates unique constraint "teams_pkey"
+DETAIL: Key (id)=(0) already exists.
+```
+
+**Cause**: This occurs when trying to create the first user account, but Team id=0 already exists in the database from a previous seeding or registration attempt.
+
+**Solution**: Use the database cleanup script to reset:
+```bash
+./cleanup-database.sh
+```
+
+Select option 1 to drop only teams and users tables, then restart:
+```bash
+./run-production.sh down
+./run-production.sh up-d
+```
+
+Alternatively, manually connect to your database and run:
+```sql
+DROP TABLE IF EXISTS team_user CASCADE;
+DROP TABLE IF EXISTS teams CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
+```
+
+The fix in commit `19dede0` handles this by checking if Team 0 exists before creating it.
+
 ### Clear Everything and Start Fresh
 
 ```bash
