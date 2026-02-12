@@ -14,6 +14,11 @@ if [ ! -f .env ]; then
     cp .env.development.example .env
 fi
 
+chown www-data:www-data .env 2>/dev/null || true
+chmod ug+rw .env 2>/dev/null || true
+mkdir -p storage bootstrap/cache
+chown -R www-data:www-data storage bootstrap/cache 2>/dev/null || true
+
 set_env_value() {
     key="$1"
     value="$2"
@@ -52,7 +57,7 @@ if [ ! -f public/build/manifest.json ]; then
 fi
 
 if ! grep -q '^APP_KEY=base64:' .env; then
-    su-exec www-data php artisan key:generate --force --no-interaction
+    php artisan key:generate --force --no-interaction
 fi
 
 if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
