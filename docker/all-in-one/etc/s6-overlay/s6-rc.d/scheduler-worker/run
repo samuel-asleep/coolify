@@ -1,0 +1,9 @@
+#!/command/execlineb -P
+
+with-contenv
+cd /var/www/html
+foreground {
+    php
+    artisan
+    start:scheduler
+}

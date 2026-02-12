@@ -1,0 +1,6 @@
+#!/command/execlineb -P
+
+with-contenv
+foreground {
+    /usr/local/bin/bootstrap-app.sh
+}

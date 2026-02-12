@@ -1,0 +1,10 @@
+#!/usr/bin/with-contenv bash
+set -euo pipefail
+
+REDIS_ARGS=(--bind 0.0.0.0 --protected-mode no --dir /data/redis)
+
+if [ -n "${REDIS_PASSWORD:-}" ] && [ "${REDIS_PASSWORD}" != "null" ]; then
+    REDIS_ARGS+=(--requirepass "${REDIS_PASSWORD}")
+fi
+
+exec su -s /bin/sh redis -c "exec redis-server ${REDIS_ARGS[*]}"
