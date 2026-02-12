@@ -3,6 +3,11 @@ name: Deploy with Cloudflare Tunnel
 on:
   workflow_dispatch:
     inputs:
+      branch:
+        description: 'Branch to deploy'
+        required: true
+        default: 'copilot/fix-dockerfile-errors'
+        type: string
       database_url:
         description: 'PostgreSQL DATABASE_URL (e.g., postgresql://user:pass@host:5432/db)'
         required: true
@@ -11,9 +16,14 @@ on:
         description: 'Redis REDIS_URL (e.g., redis://default:pass@host:6379 or rediss:// for TLS)'
         required: true
         type: string
+      reset_database:
+        description: 'Reset database (drop all tables and recreate)'
+        required: false
+        default: false
+        type: boolean
       cloudflare_tunnel_token:
-        description: 'Cloudflare Tunnel Token'
-        required: true
+        description: 'Cloudflare Tunnel Token (optional - leave empty to skip tunnel)'
+        required: false
         type: string
 
 jobs:
@@ -23,6 +33,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
       
       - name: Generate APP_KEY
         id: generate-key
@@ -88,10 +100,36 @@ jobs:
         run: |
           docker compose -f docker-compose.external.yml build
       
+      - name: Reset database (if requested)
+        if: ${{ inputs.reset_database == true }}
+        run: |
+          echo "🗑️ Resetting database..."
+          
+          # Extract database connection details from DATABASE_URL
+          DB_URL="${{ inputs.database_url }}"
+          
+          # Parse DATABASE_URL to extract components
+          # Format: postgresql://user:pass@host:port/dbname
+          DB_HOST=$(echo $DB_URL | sed -n 's/.*@\([^:]*\).*/\1/p')
+          DB_PORT=$(echo $DB_URL | sed -n 's/.*:\([0-9]*\)\/.*/\1/p')
+          DB_NAME=$(echo $DB_URL | sed -n 's/.*\/\([^?]*\).*/\1/p')
+          DB_USER=$(echo $DB_URL | sed -n 's/.*:\/\/\([^:]*\):.*/\1/p')
+          DB_PASS=$(echo $DB_URL | sed -n 's/.*:\/\/[^:]*:\([^@]*\)@.*/\1/p')
+          
+          echo "Dropping all tables in database: $DB_NAME"
+          docker run --rm \
+            -e PGPASSWORD="$DB_PASS" \
+            postgres:15-alpine \
+            psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+            -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO $DB_USER;" \
+            2>&1 || echo "⚠️ Database reset failed, continuing anyway..."
+          
+          echo "✅ Database reset complete"
+      
       - name: Start Coolify services
         run: |
           docker compose -f docker-compose.external.yml up -d
-          echo "Waiting for services to be healthy..."
+          echo "Waiting for services to start..."
           sleep 30
       
       - name: Check service health
@@ -113,7 +151,26 @@ jobs:
         run: |
           docker compose -f docker-compose.external.yml exec -T --user root coolify chown -R www-data:www-data /var/www/html/storage || true
       
+      - name: Run database migrations
+        run: |
+          echo "🔄 Running database migrations..."
+          docker compose -f docker-compose.external.yml exec -T coolify php artisan migrate --force
+          echo "✅ Migrations complete"
+      
+      - name: Check application status
+        run: |
+          echo "Verifying application is ready..."
+          for i in {1..10}; do
+            if curl -sf http://localhost:8000/register > /dev/null; then
+              echo "✅ Application is ready! Registration page is accessible."
+              break
+            fi
+            echo "Waiting for application... ($i/10)"
+            sleep 2
+          done
+      
       - name: Setup Cloudflare Tunnel
+        if: ${{ inputs.cloudflare_tunnel_token != '' }}
         run: |
           # Install cloudflared
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
@@ -131,14 +188,27 @@ jobs:
           echo "🎉 Coolify Deployment Complete!"
           echo "================================================"
           echo ""
+          echo "Branch: ${{ inputs.branch }}"
+          echo "Database Reset: ${{ inputs.reset_database }}"
+          echo ""
           echo "Services Status:"
           docker compose -f docker-compose.external.yml ps
           echo ""
           echo "Local Access: http://localhost:8000"
-          echo "Tunnel Access: Check your Cloudflare dashboard for the public URL"
+          if [ -n "${{ inputs.cloudflare_tunnel_token }}" ]; then
+            echo "Tunnel Access: Check your Cloudflare dashboard for the public URL"
+          else
+            echo "Tunnel: Not configured (token not provided)"
+          fi
           echo ""
           echo "Health Check:"
           curl -s http://localhost:8000/api/health
+          echo ""
+          echo ""
+          echo "📝 Next Steps:"
+          echo "1. Visit http://localhost:8000/register to create your account"
+          echo "2. After registration, you'll be redirected to the dashboard"
+          echo "3. Start deploying your applications!"
           echo ""
           echo "================================================"
       
@@ -150,9 +220,14 @@ jobs:
       
       - name: Keep workflow running
         run: |
-          echo "Workflow will keep running to maintain the tunnel..."
+          if [ -n "${{ inputs.cloudflare_tunnel_token }}" ]; then
+            echo "Workflow will keep running to maintain the Cloudflare tunnel..."
+          else
+            echo "Workflow will keep running to maintain the deployment..."
+          fi
           echo "The deployment will stay active for the duration of this workflow run."
           echo "To stop the deployment, cancel this workflow run."
+          echo ""
           
           # Keep the workflow alive
           while true; do
