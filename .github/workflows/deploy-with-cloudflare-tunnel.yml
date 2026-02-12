@@ -105,16 +105,34 @@ jobs:
         run: |
           echo "🗑️ Resetting database..."
           
-          # Extract database connection details from DATABASE_URL
+          # Use a more robust method to parse DATABASE_URL
+          # Handle formats like: postgresql://user:pass@host:port/dbname?sslmode=require
           DB_URL="${{ inputs.database_url }}"
           
-          # Parse DATABASE_URL to extract components
-          # Format: postgresql://user:pass@host:port/dbname
-          DB_HOST=$(echo $DB_URL | sed -n 's/.*@\([^:]*\).*/\1/p')
-          DB_PORT=$(echo $DB_URL | sed -n 's/.*:\([0-9]*\)\/.*/\1/p')
-          DB_NAME=$(echo $DB_URL | sed -n 's/.*\/\([^?]*\).*/\1/p')
-          DB_USER=$(echo $DB_URL | sed -n 's/.*:\/\/\([^:]*\):.*/\1/p')
-          DB_PASS=$(echo $DB_URL | sed -n 's/.*:\/\/[^:]*:\([^@]*\)@.*/\1/p')
+          # Extract components using Python for better parsing
+          cat > /tmp/parse_db_url.py << 'PYTHON_SCRIPT'
+          import sys
+          import urllib.parse
+          
+          url = sys.argv[1]
+          parsed = urllib.parse.urlparse(url)
+          
+          print(f"DB_HOST={parsed.hostname}")
+          print(f"DB_PORT={parsed.port or 5432}")
+          print(f"DB_NAME={parsed.path.lstrip('/')}")
+          print(f"DB_USER={parsed.username}")
+          print(f"DB_PASS={parsed.password}")
+          PYTHON_SCRIPT
+          
+          # Parse the URL and export variables
+          eval $(python3 /tmp/parse_db_url.py "$DB_URL")
+          
+          echo "Connecting to database:"
+          echo "  Host: $DB_HOST"
+          echo "  Port: $DB_PORT"
+          echo "  Database: $DB_NAME"
+          echo "  User: $DB_USER"
+          echo ""
           
           echo "Dropping all tables in database: $DB_NAME"
           docker run --rm \
@@ -122,9 +140,14 @@ jobs:
             postgres:15-alpine \
             psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
             -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO $DB_USER;" \
-            2>&1 || echo "⚠️ Database reset failed, continuing anyway..."
+            2>&1
           
-          echo "✅ Database reset complete"
+          if [ $? -eq 0 ]; then
+            echo "✅ Database reset complete"
+          else
+            echo "❌ Database reset failed!"
+            exit 1
+          fi
       
       - name: Start Coolify services
         run: |
@@ -149,7 +172,18 @@ jobs:
       
       - name: Fix storage permissions
         run: |
-          docker compose -f docker-compose.external.yml exec -T --user root coolify chown -R www-data:www-data /var/www/html/storage || true
+          echo "🔧 Fixing storage and bootstrap permissions..."
+          docker compose -f docker-compose.external.yml exec -T --user root coolify bash -c '
+            chown -R www-data:www-data /var/www/html/storage
+            chown -R www-data:www-data /var/www/html/bootstrap/cache
+            chmod -R 775 /var/www/html/storage
+            chmod -R 775 /var/www/html/bootstrap/cache
+            mkdir -p /var/www/html/storage/app/ssh/keys
+            mkdir -p /var/www/html/storage/logs
+            chown -R www-data:www-data /var/www/html/storage/app/ssh
+            chown -R www-data:www-data /var/www/html/storage/logs
+          ' || echo "⚠️ Some permission fixes failed, continuing..."
+          echo "✅ Permissions fixed"
       
       - name: Run database migrations
         run: |
