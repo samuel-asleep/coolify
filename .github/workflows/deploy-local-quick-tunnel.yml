@@ -81,17 +81,19 @@ jobs:
           SSH_MUX_ENABLED=true
           
           # Database Configuration - Local PostgreSQL
-          DATABASE_URL=postgresql://coolify:coolify_password@host.docker.internal:5432/coolify
+          # GitHub Actions services are accessible via localhost from the runner
+          # But Docker containers need to use host.docker.internal
+          DATABASE_URL=postgresql://coolify:coolify_password@localhost:5432/coolify
           DB_CONNECTION=pgsql
-          DB_HOST=host.docker.internal
+          DB_HOST=localhost
           DB_PORT=5432
           DB_DATABASE=coolify
           DB_USERNAME=coolify
           DB_PASSWORD=coolify_password
           
           # Redis Configuration - Local Redis
-          REDIS_URL=redis://host.docker.internal:6379
-          REDIS_HOST=host.docker.internal
+          REDIS_URL=redis://localhost:6379
+          REDIS_HOST=localhost
           REDIS_PORT=6379
           REDIS_PASSWORD=
           
@@ -202,7 +204,7 @@ jobs:
           TUNNEL_PID=$!
           
           echo "Waiting for tunnel URL..."
-          sleep 10
+          sleep 15
           
           # Extract the tunnel URL from logs
           TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/tunnel.log | head -1)
@@ -227,7 +229,54 @@ jobs:
           else
             echo "⚠️ Could not extract tunnel URL, but tunnel may still be running"
             cat /tmp/tunnel.log
+            # Set a fallback URL
+            TUNNEL_URL="http://localhost:8000"
+            echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
           fi
+      
+      - name: Update APP_URL with Tunnel URL
+        if: steps.tunnel.outputs.tunnel_url != '' && steps.tunnel.outputs.tunnel_url != 'http://localhost:8000'
+        run: |
+          echo "🔄 Updating APP_URL in .env with Quick Tunnel URL..."
+          
+          # Update APP_URL in the .env file
+          sed -i "s|APP_URL=.*|APP_URL=${{ steps.tunnel.outputs.tunnel_url }}|" .env.production.custom
+          
+          echo "✅ Updated APP_URL to: ${{ steps.tunnel.outputs.tunnel_url }}"
+          
+          # Copy updated .env into the container
+          docker compose -f docker-compose.external.yml cp .env.production.custom coolify:/var/www/html/.env.production.custom
+          
+          # Restart the container to pick up the new URL
+          echo "🔄 Restarting Coolify to apply new APP_URL..."
+          docker compose -f docker-compose.external.yml restart coolify
+          
+          # Wait for it to be healthy again
+          echo "Waiting for Coolify to restart..."
+          sleep 20
+          
+          for i in {1..20}; do
+            if curl -sf http://localhost:8000/api/health > /dev/null; then
+              echo "✅ Coolify restarted successfully with new URL!"
+              break
+            fi
+            echo "Waiting for Coolify... ($i/20)"
+            sleep 2
+          done
+      
+      - name: Verify configuration
+        run: |
+          echo "📋 Verifying .env configuration..."
+          echo ""
+          echo "Database URL from .env:"
+          grep "^DATABASE_URL=" .env.production.custom || echo "Not found!"
+          echo ""
+          echo "Redis URL from .env:"
+          grep "^REDIS_URL=" .env.production.custom || echo "Not found!"
+          echo ""
+          echo "APP_URL from .env:"
+          grep "^APP_URL=" .env.production.custom || echo "Not found!"
+          echo ""
       
       - name: Display connection info
         run: |
