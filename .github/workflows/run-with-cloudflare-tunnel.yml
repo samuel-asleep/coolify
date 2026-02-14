@@ -53,11 +53,6 @@ jobs:
           EOF
           echo "✅ Environment file configured"
 
-      - name: Install PHP dependencies
-        run: |
-          composer install --no-interaction --prefer-dist --optimize-autoloader
-          echo "✅ Composer dependencies installed"
-
       - name: Build Docker images
         run: |
           docker compose -f docker-compose.yml -f docker-compose.dev.yml build coolify soketi
@@ -81,6 +76,9 @@ jobs:
       - name: Start Coolify application
         run: |
           docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d coolify soketi
+          echo "Installing PHP dependencies inside container..."
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T coolify composer install --no-interaction --prefer-dist --optimize-autoloader
+          echo "✅ Composer dependencies installed"
           echo "Waiting for Coolify to start..."
           # Wait for Coolify health check
           for i in {1..60}; do
