@@ -8,12 +8,12 @@ on:
         required: true
         type: string
       app_port:
-        description: App port exposed on runner
+        description: Laravel app port
         required: false
-        default: '8000'
+        default: '3000'
         type: string
       health_path:
-        description: Health check path (auto, /api/health, /up, /register, /)
+        description: Health check path (auto, /api/health, /up, /, etc.)
         required: false
         default: 'auto'
         type: string
@@ -38,71 +38,159 @@ jobs:
           requested='${{ inputs.health_path }}'
           if [ "$requested" != 'auto' ]; then
             primary_path="$requested"
-          elif rg -n "Route::get\('/health'" routes/api.php >/dev/null 2>&1; then
-            primary_path='/api/health'
           elif rg -n "Route::get\('/up'|Route::view\('/up'" routes >/dev/null 2>&1; then
             primary_path='/up'
+          elif rg -n "Route::get\('/health'" routes/api.php >/dev/null 2>&1; then
+            primary_path='/api/health'
           else
-            primary_path='/register'
+            primary_path='/'
           fi
 
-          fallback_paths="$primary_path,/api/health,/register,/,/up"
+          fallback_paths="$primary_path,/,/api/health,/up"
           echo "primary_path=$primary_path" >> "$GITHUB_OUTPUT"
           echo "fallback_paths=$fallback_paths" >> "$GITHUB_OUTPUT"
+          echo "Primary health path: $primary_path"
+          echo "Fallback order: $fallback_paths"
 
-      - name: Prepare .env for dockerized startup
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, xml, ctype, json, pdo_pgsql, pgsql, redis, bcmath
+          coverage: none
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Start Postgres + Redis with docker compose
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ -f .env.development.example ]; then
-            cp .env.development.example .env
-          elif [ -f .env.example ]; then
-            cp .env.example .env
-          else
-            touch .env
+          cat > docker-compose.quicktunnel.yml <<'EOF'
+          services:
+            postgres:
+              image: postgres:16-alpine
+              ports:
+                - "5432:5432"
+              environment:
+                POSTGRES_USER: app
+                POSTGRES_PASSWORD: app
+                POSTGRES_DB: app
+              healthcheck:
+                test: ["CMD-SHELL", "pg_isready -U app -d app"]
+                interval: 5s
+                timeout: 3s
+                retries: 30
+            redis:
+              image: redis:7-alpine
+              ports:
+                - "6379:6379"
+              healthcheck:
+                test: ["CMD", "redis-cli", "ping"]
+                interval: 5s
+                timeout: 3s
+                retries: 30
+          EOF
+
+          docker compose -f docker-compose.quicktunnel.yml up -d
+
+          for i in {1..60}; do
+            pg_container="$(docker compose -f docker-compose.quicktunnel.yml ps -q postgres)"
+            rd_container="$(docker compose -f docker-compose.quicktunnel.yml ps -q redis)"
+            pg_status="$(docker inspect -f '{{.State.Health.Status}}' "$pg_container" 2>/dev/null || echo starting)"
+            rd_status="$(docker inspect -f '{{.State.Health.Status}}' "$rd_container" 2>/dev/null || echo starting)"
+
+            echo "Attempt $i/60: postgres=$pg_status redis=$rd_status"
+            if [ "$pg_status" = 'healthy' ] && [ "$rd_status" = 'healthy' ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$pg_status" != 'healthy' ] || [ "$rd_status" != 'healthy' ]; then
+            docker compose -f docker-compose.quicktunnel.yml logs
+            exit 1
           fi
 
-          APP_KEY="base64:$(openssl rand -base64 32)"
-
           {
-            echo "APP_ENV=production"
-            echo "APP_DEBUG=false"
-            echo "APP_KEY=$APP_KEY"
-            echo "APP_URL=http://localhost:${{ inputs.app_port }}"
-            echo "APP_PORT=${{ inputs.app_port }}"
             echo 'DB_CONNECTION=pgsql'
-            echo 'DB_HOST=postgres'
+            echo 'DB_HOST=127.0.0.1'
             echo 'DB_PORT=5432'
-            echo 'DB_DATABASE=coolify'
-            echo 'DB_USERNAME=coolify'
-            echo 'DB_PASSWORD=password'
-            echo 'REDIS_HOST=redis'
+            echo 'DB_DATABASE=app'
+            echo 'DB_USERNAME=app'
+            echo 'DB_PASSWORD=app'
+            echo 'REDIS_HOST=127.0.0.1'
             echo 'REDIS_PORT=6379'
+            echo 'CACHE_DRIVER=redis'
             echo 'QUEUE_CONNECTION=redis'
             echo 'SESSION_DRIVER=redis'
-            echo 'CACHE_DRIVER=redis'
-            echo 'PUSHER_APP_ID=coolify'
-            echo 'PUSHER_APP_KEY=coolify'
-            echo 'PUSHER_APP_SECRET=coolify'
-            echo 'SOKETI_DEFAULT_APP_ID=coolify'
-            echo 'SOKETI_DEFAULT_APP_KEY=coolify'
-            echo 'SOKETI_DEFAULT_APP_SECRET=coolify'
+          } >> "$GITHUB_ENV"
+
+      - name: Install PHP dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Install JS dependencies and build assets
+        run: |
+          set -euo pipefail
+
+      - name: Prepare Laravel app env
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -f .env ]; then
+            if [ -f .env.example ]; then
+              cp .env.example .env
+            elif [ -f .env.development.example ]; then
+              cp .env.development.example .env
+            else
+              cat > .env <<'EOF'
+          APP_NAME=Coolify
+          APP_ENV=local
+          APP_KEY=
+          APP_DEBUG=true
+          APP_URL=http://127.0.0.1:${{ inputs.app_port }}
+          EOF
+            fi
+          fi
+
+          php artisan key:generate --force
+
+          {
+            echo "APP_URL=http://127.0.0.1:${{ inputs.app_port }}"
+            echo "APP_PORT=${{ inputs.app_port }}"
+            echo "DB_CONNECTION=${DB_CONNECTION}"
+            echo "DB_HOST=${DB_HOST}"
+            echo "DB_PORT=${DB_PORT}"
+            echo "DB_DATABASE=${DB_DATABASE}"
+            echo "DB_USERNAME=${DB_USERNAME}"
+            echo "DB_PASSWORD=${DB_PASSWORD}"
+            echo "REDIS_HOST=${REDIS_HOST}"
+            echo "REDIS_PORT=${REDIS_PORT}"
+            echo "CACHE_DRIVER=${CACHE_DRIVER}"
+            echo "QUEUE_CONNECTION=${QUEUE_CONNECTION}"
+            echo "SESSION_DRIVER=${SESSION_DRIVER}"
           } >> .env
 
-      - name: Build Coolify image
+          php artisan optimize:clear
+
+      - name: Run migrations
+        run: php artisan migrate --force
+
+      - name: Start Laravel app
         shell: bash
         run: |
           set -euo pipefail
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml build coolify soketi
+          nohup php artisan serve --host=0.0.0.0 --port='${{ inputs.app_port }}' > app.log 2>&1 &
+          echo $! > app.pid
+          sleep 2
+          tail -n 40 app.log || true
 
-      - name: Start stack (coolify, postgres, redis, soketi)
-        shell: bash
-        run: |
-          set -euo pipefail
-          APP_PORT='${{ inputs.app_port }}' docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis soketi coolify
-
-      - name: Wait for local stack health
+      - name: Verify local health
         shell: bash
         run: |
           set -euo pipefail
@@ -113,21 +201,20 @@ jobs:
               code="$(curl -sS -L -o /tmp/local-health.out -w '%{http_code}' "http://127.0.0.1:${{ inputs.app_port }}${path}" || echo 000)"
               if [ "$code" != '000' ] && [ "$code" -lt 500 ]; then
                 echo "Local app is up (HTTP $code): http://127.0.0.1:${{ inputs.app_port }}${path}"
+                echo "resolved_health_path=$path" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
               echo "Attempt $i/90 local path $path => HTTP $code"
             done
 
             if [ $((i % 10)) -eq 0 ]; then
-              docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
-              docker compose -f docker-compose.yml -f docker-compose.dev.yml logs --tail=80 coolify || true
+              tail -n 120 app.log || true
             fi
             sleep 2
           done
 
           echo 'Local health checks failed for all candidate paths.'
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml logs --tail=200 coolify || true
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml logs --tail=200 soketi || true
+          tail -n 200 app.log || true
           exit 1
 
       - name: Run migrations in container
@@ -144,35 +231,35 @@ jobs:
           sudo dpkg -i cloudflared-linux-amd64.deb
           cloudflared --version
 
-      - name: Start Quick Tunnel
+      - name: Setup Cloudflare Quick Tunnel
         id: tunnel
         shell: bash
         run: |
           set -euo pipefail
 
-          nohup cloudflared tunnel --url "http://127.0.0.1:${{ inputs.app_port }}" > tunnel.log 2>&1 &
+          cloudflared tunnel --url "http://localhost:${{ inputs.app_port }}" > /tmp/tunnel.log 2>&1 &
           echo $! > tunnel.pid
 
-          tunnel_url=''
-          for i in {1..60}; do
-            tunnel_url="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' tunnel.log | head -n 1 || true)"
+          echo "Waiting for tunnel URL..."
+          for i in {1..30}; do
+            tunnel_url="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/tunnel.log | head -n 1 || true)"
             if [ -n "$tunnel_url" ]; then
               break
             fi
             sleep 2
           done
 
-          if [ -z "$tunnel_url" ]; then
-            echo 'Could not find trycloudflare URL in tunnel.log.'
-            tail -n 200 tunnel.log || true
+          if [ -z "${tunnel_url:-}" ]; then
+            echo 'Could not extract trycloudflare URL from logs.'
+            cat /tmp/tunnel.log || true
             exit 1
           fi
 
           echo "tunnel_url=$tunnel_url" >> "$GITHUB_OUTPUT"
-          echo '===================================================='
-          echo "Quick Tunnel URL: $tunnel_url"
-          echo "Primary Health URL: $tunnel_url${{ steps.health.outputs.primary_path }}"
-          echo '===================================================='
+
+          echo "=========================================="
+          echo "Public URL: $tunnel_url"
+          echo "=========================================="
 
       - name: Verify public health
         shell: bash
@@ -193,8 +280,8 @@ jobs:
           done
 
           echo 'Public health checks failed for all candidate paths.'
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml logs --tail=200 coolify || true
-          tail -n 200 tunnel.log || true
+          tail -n 200 app.log || true
+          tail -n 200 /tmp/tunnel.log || true
           exit 1
 
       - name: Keep tunnel alive for up to 10 minutes
@@ -203,20 +290,20 @@ jobs:
           set -euo pipefail
 
           for i in {1..20}; do
+            if ! kill -0 "$(cat app.pid)" 2>/dev/null; then
+              echo 'Laravel process exited early.'
+              tail -n 200 app.log || true
+              exit 1
+            fi
+
             if ! kill -0 "$(cat tunnel.pid)" 2>/dev/null; then
               echo 'cloudflared process exited early.'
-              tail -n 200 tunnel.log || true
-              docker compose -f docker-compose.yml -f docker-compose.dev.yml logs --tail=200 coolify || true
+              tail -n 200 /tmp/tunnel.log || true
+              tail -n 200 app.log || true
               exit 1
             fi
 
-            if ! curl -sS -L -o /tmp/keepalive.out -w '%{http_code}' "http://127.0.0.1:${{ inputs.app_port }}${{ steps.health.outputs.primary_path }}" | awk '{exit !($1 != 0 && $1 < 500)}'; then
-              echo 'Local health probe failed during keepalive.'
-              docker compose -f docker-compose.yml -f docker-compose.dev.yml logs --tail=200 coolify || true
-              exit 1
-            fi
-
-            echo "[$i/20] Stack and tunnel are alive. Public URL: ${{ steps.tunnel.outputs.tunnel_url }}"
+            echo "[$i/20] App and tunnel are alive. Public URL: ${{ steps.tunnel.outputs.tunnel_url }}"
             sleep 30
           done
 
@@ -225,4 +312,5 @@ jobs:
         shell: bash
         run: |
           kill "$(cat tunnel.pid 2>/dev/null)" 2>/dev/null || true
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v 2>/dev/null || true
+          kill "$(cat app.pid 2>/dev/null)" 2>/dev/null || true
+          docker compose -f docker-compose.quicktunnel.yml down -v 2>/dev/null || true
