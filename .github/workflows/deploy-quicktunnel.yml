@@ -1,4 +1,4 @@
-name: Deploy with Quick Tunnel
+name: Deploy with Local Services and Quick Tunnel
 
 on:
   workflow_dispatch:
@@ -135,8 +135,7 @@ jobs:
 
       - name: Install JS dependencies and build assets
         run: |
-          npm ci
-          npm run build
+          set -euo pipefail
 
       - name: Prepare Laravel app env
         shell: bash
@@ -218,6 +217,12 @@ jobs:
           echo 'Local health checks failed for all candidate paths.'
           tail -n 200 app.log || true
           exit 1
+
+      - name: Run migrations in container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T coolify php artisan migrate --force
 
       - name: Install cloudflared
         shell: bash
