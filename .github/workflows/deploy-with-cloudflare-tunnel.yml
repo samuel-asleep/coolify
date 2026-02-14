@@ -14,7 +14,7 @@ jobs:
     name: Build and Deploy Coolify
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    
+
     services:
       postgres:
         image: postgres:15-alpine
@@ -30,7 +30,7 @@ jobs:
           --health-interval 5s
           --health-timeout 2s
           --health-retries 10
-      
+
       redis:
         image: redis:7-alpine
         ports:
@@ -269,7 +269,7 @@ jobs:
           php artisan serve --host=0.0.0.0 --port=8080 &
           SERVER_PID=$!
           echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
-          
+
           # Wait for the server to be ready
           echo "Waiting for Laravel server to start..."
           max_attempts=30
@@ -304,34 +304,34 @@ jobs:
           cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
           TUNNEL_PID=$!
           echo "TUNNEL_PID=$TUNNEL_PID" >> $GITHUB_ENV
-          
+
           # Wait for tunnel URL to be available
           echo "Waiting for Cloudflare tunnel to start..."
           max_attempts=30
           attempt=0
           tunnel_url=""
-          
+
           while [ -z "$tunnel_url" ] && [ $attempt -lt $max_attempts ]; do
             attempt=$((attempt + 1))
             sleep 2
-            
+
             # Extract tunnel URL from logs
             if [ -f tunnel.log ]; then
               tunnel_url=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' tunnel.log | head -1)
             fi
-            
+
             if [ -z "$tunnel_url" ]; then
               echo "Attempt $attempt/$max_attempts: Waiting for tunnel URL..."
             fi
           done
-          
+
           if [ -n "$tunnel_url" ]; then
             echo "✓ Cloudflare tunnel started successfully!"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             echo "🌐 Application is accessible at: $tunnel_url"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             echo "TUNNEL_URL=$tunnel_url" >> $GITHUB_ENV
-            
+
             # Also save to a summary
             echo "### 🚀 Deployment Successful!" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
@@ -354,36 +354,36 @@ jobs:
           echo "The workflow will continue running for the remainder of the 30-minute timeout."
           echo "Press 'Cancel workflow' in GitHub Actions to stop it early."
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          
+
           # Calculate remaining time (30 minutes total - time elapsed so far)
           start_time=$SECONDS
           max_duration=$((30 * 60))  # 30 minutes in seconds
-          
+
           while true; do
             elapsed=$((SECONDS - start_time))
             remaining=$((max_duration - elapsed))
-            
+
             if [ $remaining -le 0 ]; then
               echo "⏰ Maximum runtime of 30 minutes reached. Shutting down..."
               break
             fi
-            
+
             # Show status every minute
             if [ $((elapsed % 60)) -eq 0 ]; then
               minutes_remaining=$((remaining / 60))
               echo "⏱ Application still running... ($minutes_remaining minutes remaining)"
               echo "   URL: $TUNNEL_URL"
-              
+
               # Verify application is still responding
               response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/api/health || echo "000")
               if [ "$response" != "200" ]; then
                 echo "⚠ Warning: Application health check failed (HTTP $response)"
               fi
             fi
-            
+
             sleep 10
           done
-          
+
           echo "✓ Workflow completed"
 
       - name: Cleanup
