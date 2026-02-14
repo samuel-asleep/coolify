@@ -46,7 +46,7 @@ jobs:
             primary_path='/'
           fi
 
-          fallback_paths="$primary_path,/,/api/health,/up"
+          fallback_paths="$(printf '%s\n' "$primary_path" '/' '/api/health' '/up' | awk '!seen[$0]++' | paste -sd, -)"
           echo "primary_path=$primary_path" >> "$GITHUB_OUTPUT"
           echo "fallback_paths=$fallback_paths" >> "$GITHUB_OUTPUT"
           echo "Primary health path: $primary_path"
@@ -191,6 +191,7 @@ jobs:
           tail -n 40 app.log || true
 
       - name: Verify local health
+        id: local_health
         shell: bash
         run: |
           set -euo pipefail
@@ -265,7 +266,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          IFS=',' read -r -a paths <<< '${{ steps.health.outputs.fallback_paths }}'
+          resolved_path='${{ steps.local_health.outputs.resolved_health_path }}'
+          fallback_paths='${{ steps.health.outputs.fallback_paths }}'
+          if [ -n "$resolved_path" ]; then
+            paths_csv="$resolved_path,$fallback_paths"
+          else
+            paths_csv="$fallback_paths"
+          fi
+
+          IFS=',' read -r -a paths <<< "$(printf '%s' "$paths_csv" | tr ',' '\n' | awk '!seen[$0]++' | paste -sd, -)"
 
           for i in {1..30}; do
             for path in "${paths[@]}"; do
