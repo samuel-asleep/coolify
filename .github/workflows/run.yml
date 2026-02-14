@@ -1,4 +1,4 @@
-name: Run Coolify with Cloudflare Quick Tunnel
+name: Build and Deploy Coolify Fork
 
 on:
   workflow_dispatch:
@@ -6,213 +6,466 @@ on:
       branch:
         description: 'Branch to deploy'
         required: true
-        default: 'v4.x'
+        default: 'add-open-replay'
         type: string
-      tunnel_duration:
-        description: 'How long to keep tunnel alive (minutes)'
+      registry_url:
+        description: 'Docker Registry URL'
         required: false
-        default: '30'
-        type: number
-  push:
-    branches:
-      - main
-      - develop
-      - next
+        default: 'ghcr.io'
+        type: string
 
-permissions:
-  contents: read
+env:
+  PORT: 8000
 
 jobs:
-  run-and-expose:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+  build-and-deploy:
+    runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
+      - name: Checkout Coolify repository
+        uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.branch || github.ref }}
-          persist-credentials: false
+          repository: samuel-asleep/coolify
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
 
-      - name: Set up environment file
+      - name: Display branch information
         run: |
-          cp .env.development.example .env
-          # Generate APP_KEY
-          echo "APP_KEY=base64:$(openssl rand -base64 32)" >> .env
-          # Update DB_HOST for docker network
-          sed -i 's/DB_HOST=host.docker.internal/DB_HOST=postgres/g' .env
-          # Add missing environment variables
-          cat >> .env << 'EOF'
-          PUSHER_HOST=soketi
-          PUSHER_PORT=6001
-          PUSHER_SCHEME=http
-          REDIS_HOST=redis
-          REDIS_PORT=6379
-          MINIO_ACCESS_KEY=minioadmin
-          MINIO_SECRET_KEY=minioadmin
-          EOF
-          echo "✅ Environment file configured"
+          echo "================================================"
+          echo "Building Coolify from custom branch"
+          echo "================================================"
+          echo "Repository: samuel-asleep/coolify"
+          echo "Branch: ${{ inputs.branch }}"
+          echo "Commit: $(git rev-parse HEAD)"
+          echo "Commit Message: $(git log -1 --pretty=%B)"
+          echo "================================================"
 
-      - name: Build Docker images
-        run: |
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml build coolify soketi
-          echo "✅ Docker images built"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Start services
+      - name: Install system dependencies
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis minio
-          echo "Waiting for services to be healthy..."
-          # Wait for services with health checks
-          for i in {1..30}; do
-            if docker compose -f docker-compose.yml -f docker-compose.dev.yml ps | grep -q "(healthy)"; then
-              echo "✅ Database services are healthy"
-              break
-            fi
-            echo "Waiting for services to become healthy... ($i/30)"
-            sleep 2
-          done
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
+          sudo apt-get update
+          sudo apt-get install -y curl jq git
 
-      - name: Start Coolify application
+      - name: Download and install Cloudflared
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d coolify soketi
-          echo "Installing PHP dependencies inside container..."
-          # Run composer as root to avoid permission issues, then fix ownership
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T -u root coolify bash -c "
-            set -e
-            git config --global --add safe.directory /var/www/html
-            composer install --no-interaction --prefer-dist --optimize-autoloader
-            chown -R www-data:www-data /var/www/html/vendor /var/www/html/bootstrap/cache
-            chown -R www-data:www-data /var/www/html/storage
-            chmod -R 775 /var/www/html/storage
-            chmod -R 775 /var/www/html/bootstrap/cache
-          "
-          echo "✅ Composer dependencies installed"
-          # Restart the container to ensure all services start with correct permissions
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml restart coolify
-          echo "Waiting for Coolify to start..."
-          # Wait for Coolify health check
-          for i in {1..60}; do
-            if curl -sf http://localhost:8000/api/health > /dev/null 2>&1; then
-              echo "✅ Coolify is healthy and ready"
-              break
-            fi
-            echo "Waiting for Coolify health check... ($i/60)"
-            sleep 2
-          done
+          curl -L --output cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/
 
-      - name: Check service status
+      - name: Set up Coolify directories
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
-          echo "Checking Coolify logs..."
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml logs coolify | tail -30
+          sudo mkdir -p /data/coolify/source
+          sudo mkdir -p /data/coolify/ssh/keys
+          sudo mkdir -p /data/coolify/logs
+          sudo mkdir -p /data/coolify/applications
+          sudo mkdir -p /data/coolify/databases
+          sudo mkdir -p /data/coolify/backups
+          sudo mkdir -p /data/coolify/services
+          sudo mkdir -p /data/coolify/proxy/dynamic
+          
+          sudo chown -R $USER:$USER /data/coolify
+          sudo chmod -R 700 /data/coolify
 
-      - name: Run migrations and seed database
+      - name: Configure Docker daemon
         run: |
-          echo "Running migrations and seeders..."
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T coolify php artisan migrate --force --seed || {
-            echo "Migration failed, checking logs..."
-            docker compose -f docker-compose.yml -f docker-compose.dev.yml logs coolify | tail -50
+          sudo mkdir -p /etc/docker
+          echo '{
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "10m",
+              "max-file": "3"
+            },
+            "default-address-pools": [
+              {
+                "base": "10.0.0.0/8",
+                "size": 24
+              }
+            ]
+          }' | sudo tee /etc/docker/daemon.json
+          
+          sudo systemctl restart docker
+          sleep 5
+
+      - name: Copy repository to Coolify source directory
+        run: |
+          echo "Copying repository files to /data/coolify/source..."
+          
+          # Copy all files from the repo to the source directory
+          cp -r ./* /data/coolify/source/ 2>/dev/null || true
+          cp -r ./.* /data/coolify/source/ 2>/dev/null || true
+          
+          # Ensure docker-compose files exist
+          if [ ! -f /data/coolify/source/docker-compose.yml ]; then
+            echo "ERROR: docker-compose.yml not found in repository"
             exit 1
-          }
-          echo "✅ Database setup complete"
+          fi
+          
+          if [ ! -f /data/coolify/source/docker-compose.prod.yml ]; then
+            echo "WARNING: docker-compose.prod.yml not found, will use main compose file only"
+          fi
 
-      - name: Install Cloudflare Tunnel (cloudflared)
+      - name: Set up environment variables
+        env:
+          ROOT_USERNAME: ${{ secrets.ROOT_USERNAME || 'admin' }}
+          ROOT_USER_EMAIL: ${{ secrets.ROOT_USER_EMAIL || 'admin@example.com' }}
+          ROOT_USER_PASSWORD: ${{ secrets.ROOT_USER_PASSWORD || 'coolify2024!' }}
+          APP_KEY_SECRET: ${{ secrets.APP_KEY || '' }}
+          DB_PASSWORD_SECRET: ${{ secrets.DB_PASSWORD || '' }}
+          REDIS_PASSWORD_SECRET: ${{ secrets.REDIS_PASSWORD || '' }}
         run: |
-          # Download and install cloudflared
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
-          cloudflared --version
+          ENV_FILE="/data/coolify/source/.env"
+          
+          # Check if .env.production exists in the repo
+          if [ -f /data/coolify/source/.env.production ]; then
+            echo "Using .env.production from repository"
+            cp /data/coolify/source/.env.production "$ENV_FILE"
+          elif [ -f /data/coolify/source/.env.example ]; then
+            echo "Using .env.example from repository"
+            cp /data/coolify/source/.env.example "$ENV_FILE"
+          else
+            echo "Creating minimal .env file"
+            cat > "$ENV_FILE" << 'EOF'
+          APP_ID=$(openssl rand -hex 16)
+          APP_NAME=Coolify
+          APP_ENV=production
+          APP_DEBUG=false
+          APP_URL=http://localhost
+          APP_PORT=8000
+          
+          DB_CONNECTION=pgsql
+          DB_HOST=postgres
+          DB_PORT=5432
+          DB_DATABASE=coolify
+          DB_USERNAME=coolify
+          DB_PASSWORD=$(openssl rand -base64 32)
+          
+          REDIS_HOST=redis
+          REDIS_PASSWORD=$(openssl rand -base64 32)
+          
+          AUTOUPDATE=false
+          SELF_HOSTED=true
+          EOF
+          fi
+          
+          # Generate secure secrets (use provided secrets or generate new ones)
+          if [ -n "$APP_KEY_SECRET" ]; then
+            APP_KEY="$APP_KEY_SECRET"
+            echo "Using APP_KEY from GitHub secrets"
+          else
+            APP_KEY="base64:$(openssl rand -base64 32)"
+            echo "Generated new APP_KEY"
+          fi
+          
+          if [ -n "$DB_PASSWORD_SECRET" ]; then
+            DB_PASSWORD="$DB_PASSWORD_SECRET"
+            echo "Using DB_PASSWORD from GitHub secrets"
+          else
+            DB_PASSWORD=$(openssl rand -base64 32)
+            echo "Generated new DB_PASSWORD"
+          fi
+          
+          if [ -n "$REDIS_PASSWORD_SECRET" ]; then
+            REDIS_PASSWORD="$REDIS_PASSWORD_SECRET"
+            echo "Using REDIS_PASSWORD from GitHub secrets"
+          else
+            REDIS_PASSWORD=$(openssl rand -base64 32)
+            echo "Generated new REDIS_PASSWORD"
+          fi
+          
+          PUSHER_APP_ID=$(openssl rand -hex 8)
+          PUSHER_APP_KEY=$(openssl rand -hex 16)
+          PUSHER_APP_SECRET=$(openssl rand -hex 16)
+          
+          # Update or add environment variables
+          update_env_var() {
+            local key=$1
+            local value=$2
+            if grep -q "^${key}=" "$ENV_FILE"; then
+              sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+            else
+              echo "${key}=${value}" >> "$ENV_FILE"
+            fi
+          }
+          
+          update_env_var "APP_KEY" "$APP_KEY"
+          update_env_var "APP_ENV" "production"
+          update_env_var "APP_DEBUG" "false"
+          update_env_var "DB_PASSWORD" "$DB_PASSWORD"
+          update_env_var "REDIS_PASSWORD" "$REDIS_PASSWORD"
+          update_env_var "PUSHER_APP_ID" "$PUSHER_APP_ID"
+          update_env_var "PUSHER_APP_KEY" "$PUSHER_APP_KEY"
+          update_env_var "PUSHER_APP_SECRET" "$PUSHER_APP_SECRET"
+          update_env_var "AUTOUPDATE" "false"
+          
+          # Set user credentials
+          update_env_var "ROOT_USERNAME" "$ROOT_USERNAME"
+          update_env_var "ROOT_USER_EMAIL" "$ROOT_USER_EMAIL"
+          update_env_var "ROOT_USER_PASSWORD" "$ROOT_USER_PASSWORD"
+          
+          echo "Environment variables configured"
+          echo "Config file location: $ENV_FILE"
+
+      - name: Generate SSH keys
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          touch ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+          
+          # Generate SSH key for Coolify
+          if [ ! -f /data/coolify/ssh/keys/id.root@host.docker.internal ]; then
+            ssh-keygen -t ed25519 -a 100 -f /data/coolify/ssh/keys/id.root@host.docker.internal -q -N "" -C coolify
+            cat /data/coolify/ssh/keys/id.root@host.docker.internal.pub >> ~/.ssh/authorized_keys
+          fi
+          
+          sudo chown -R 9999:root /data/coolify 2>/dev/null || true
+          sudo chmod -R 700 /data/coolify
+
+      - name: Build Docker images from source
+        run: |
+          cd /data/coolify/source
+          
+          echo "Building Coolify Docker images from source..."
+          
+          # Check if there's a Dockerfile in the repo
+          if [ -f Dockerfile ]; then
+            echo "Found Dockerfile, building custom image..."
+            docker build -t coolify:custom -f Dockerfile .
+          elif [ -f docker/Dockerfile ]; then
+            echo "Found docker/Dockerfile, building custom image..."
+            docker build -t coolify:custom -f docker/Dockerfile .
+          else
+            echo "No Dockerfile found, will use docker-compose to build"
+          fi
+          
+          # Build using docker-compose
+          if [ -f docker-compose.prod.yml ]; then
+            echo "Building with docker-compose.prod.yml..."
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml build
+          else
+            echo "Building with docker-compose.yml..."
+            docker compose -f docker-compose.yml build
+          fi
+
+      - name: Start Coolify services
+        run: |
+          cd /data/coolify/source
+          
+          echo "Starting Coolify services..."
+          
+          # Start services
+          if [ -f docker-compose.prod.yml ]; then
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+          else
+            docker compose -f docker-compose.yml up -d
+          fi
+          
+          echo "Services started!"
+          docker compose ps
+
+      - name: Wait for Coolify to be ready
+        run: |
+          echo "Waiting for Coolify to be healthy..."
+          max_attempts=90
+          attempt=0
+          
+          while [ $attempt -lt $max_attempts ]; do
+            # Check if coolify container exists and is running
+            if docker ps --format '{{.Names}}' | grep -q "coolify"; then
+              # Check health status
+              health=$(docker inspect --format='{{.State.Health.Status}}' coolify 2>/dev/null || echo "unknown")
+              
+              if [ "$health" = "healthy" ]; then
+                echo "✓ Coolify is healthy!"
+                break
+              elif [ "$health" = "unhealthy" ]; then
+                echo "✗ Coolify is unhealthy, checking logs..."
+                docker logs coolify --tail 50
+                exit 1
+              else
+                echo "Waiting for health check... (attempt $((attempt + 1))/$max_attempts, status: $health)"
+              fi
+            else
+              # If no health check, check if container is running
+              if docker ps --format '{{.Names}}' | grep -q "coolify"; then
+                echo "✓ Coolify container is running (no health check defined)"
+                
+                # Try to curl the application
+                if curl -f http://localhost:${{ env.PORT }} >/dev/null 2>&1; then
+                  echo "✓ Coolify is responding on port ${{ env.PORT }}"
+                  break
+                fi
+              fi
+              
+              echo "Waiting for Coolify to start... (attempt $((attempt + 1))/$max_attempts)"
+            fi
+            
+            sleep 5
+            attempt=$((attempt + 1))
+          done
+          
+          if [ $attempt -eq $max_attempts ]; then
+            echo "✗ Coolify did not become ready in time"
+            echo "Docker containers:"
+            docker ps -a
+            echo ""
+            echo "Coolify logs:"
+            docker logs coolify 2>&1 || true
+            exit 1
+          fi
+          
+          echo ""
+          echo "✓ Coolify is ready!"
+
+      - name: Display container information
+        run: |
+          echo "================================================"
+          echo "Running Containers"
+          echo "================================================"
+          docker ps
+          echo ""
+          echo "================================================"
+          echo "Docker Networks"
+          echo "================================================"
+          docker network ls
+          echo ""
+          echo "================================================"
+          echo "Docker Volumes"
+          echo "================================================"
+          docker volume ls
 
       - name: Start Cloudflare Quick Tunnel
         run: |
-          # Start cloudflared tunnel in background and capture the URL
           echo "Starting Cloudflare Quick Tunnel..."
-          nohup cloudflared tunnel --url http://localhost:8000 > tunnel.log 2>&1 &
-          TUNNEL_PID=$!
-          echo "TUNNEL_PID=${TUNNEL_PID}" >> $GITHUB_ENV
           
-          # Wait for tunnel to establish and get URL with retry logic
-          echo "Waiting for tunnel to establish..."
-          TUNNEL_URL=""
-          for i in {1..30}; do
-            TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' tunnel.log | head -1 || echo "")
-            if [ ! -z "$TUNNEL_URL" ]; then
-              echo "✅ Tunnel established successfully"
+          cloudflared tunnel --url http://localhost:${{ env.PORT }} > tunnel.log 2>&1 &
+          TUNNEL_PID=$!
+          
+          echo "Tunnel PID: $TUNNEL_PID"
+          echo $TUNNEL_PID > tunnel.pid
+          
+          echo "Waiting for tunnel URL..."
+          max_attempts=30
+          attempt=0
+          
+          while [ $attempt -lt $max_attempts ]; do
+            if grep -q "https://.*trycloudflare.com" tunnel.log; then
+              TUNNEL_URL=$(grep -oP "https://[^\s]+trycloudflare.com" tunnel.log | head -1)
+              echo "✅ Tunnel established!"
+              echo "🌐 Public URL: $TUNNEL_URL"
+              echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+              echo "$TUNNEL_URL" > tunnel.url
               break
             fi
-            echo "Waiting for tunnel URL... ($i/30)"
+            
+            echo "Waiting for tunnel URL... (attempt $((attempt + 1))/$max_attempts)"
             sleep 2
+            attempt=$((attempt + 1))
           done
           
-          if [ -z "$TUNNEL_URL" ]; then
-            echo "Failed to get tunnel URL after 60 seconds, checking logs..."
+          if [ $attempt -eq $max_attempts ]; then
+            echo "Failed to get tunnel URL"
             cat tunnel.log
             exit 1
           fi
-          
-          echo "TUNNEL_URL=${TUNNEL_URL}" >> $GITHUB_ENV
-          echo "✅ Coolify is now accessible at: ${TUNNEL_URL}"
-          echo "::notice title=Cloudflare Tunnel URL::${TUNNEL_URL}"
 
-      - name: Display access information
+      - name: Display deployment information
         run: |
-          echo "================================================"
-          echo "🚀 Coolify is running and accessible via Cloudflare Quick Tunnel!"
-          echo "================================================"
-          echo ""
-          echo "🌐 Public URL: ${{ env.TUNNEL_URL }}"
-          echo "🔐 Default Login: test@example.com"
-          echo "🔑 Default Password: password"
-          echo "🌿 Branch: ${{ inputs.branch || github.ref_name }}"
           echo ""
           echo "================================================"
+          echo "🚀 DEPLOYMENT SUCCESSFUL!"
+          echo "================================================"
           echo ""
-          echo "The application will remain accessible for ${{ inputs.tunnel_duration || 30 }} minutes."
+          echo "📦 Repository: samuel-asleep/coolify"
+          echo "🌿 Branch: ${{ inputs.branch }}"
+          echo "📝 Commit: $(cd /data/coolify/source && git rev-parse --short HEAD)"
+          echo ""
+          echo "🌐 Access your Coolify instance at:"
+          echo "   $(cat tunnel.url)"
+          echo ""
+          echo "🔐 Login credentials:"
+          echo "   Username: ${{ secrets.ROOT_USERNAME || 'admin' }}"
+          echo "   Email: ${{ secrets.ROOT_USER_EMAIL || 'admin@example.com' }}"
+          echo "   Password: ${{ secrets.ROOT_USER_PASSWORD || 'coolify2024!' }}"
+          echo ""
+          echo "⏰ This tunnel will remain active for up to 6 hours"
+          echo "   Cancel the workflow to stop the tunnel"
+          echo ""
+          echo "📊 Running containers:"
+          docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+          echo ""
+          echo "================================================"
 
-      - name: Keep tunnel alive
+      - name: Keep tunnel alive and monitor
         run: |
-          DURATION=${{ inputs.tunnel_duration || 30 }}
-          echo "Keeping tunnel alive for ${DURATION} minutes..."
-          echo "You can access Coolify at: ${{ env.TUNNEL_URL }}"
+          echo "Keeping tunnel alive and monitoring services..."
+          echo "Press 'Cancel workflow' button to stop"
+          echo ""
           
-          CURRENT_TUNNEL_PID=${{ env.TUNNEL_PID }}
-          
-          # Keep the tunnel alive and periodically check status
-          for i in $(seq 1 ${DURATION}); do
-            echo "[$i/${DURATION}] Tunnel still active at: ${{ env.TUNNEL_URL }}"
-            sleep 60
-            
-            # Check if tunnel process is still running
-            if ! kill -0 ${CURRENT_TUNNEL_PID} 2>/dev/null; then
-              echo "Tunnel process died, restarting..."
-              nohup cloudflared tunnel --url http://localhost:8000 > tunnel.log 2>&1 &
-              CURRENT_TUNNEL_PID=$!
-              sleep 5
-              echo "Tunnel restarted with PID: ${CURRENT_TUNNEL_PID}"
+          while true; do
+            # Check tunnel
+            if [ -f tunnel.pid ]; then
+              TUNNEL_PID=$(cat tunnel.pid)
+              if ! kill -0 $TUNNEL_PID 2>/dev/null; then
+                echo "❌ Tunnel process died, exiting..."
+                exit 1
+              fi
             fi
+            
+            # Check Coolify health
+            if docker ps --format '{{.Names}}' | grep -q "coolify"; then
+              health=$(docker inspect --format='{{.State.Health.Status}}' coolify 2>/dev/null || echo "running")
+              
+              if [ "$health" = "unhealthy" ]; then
+                echo "❌ Coolify became unhealthy!"
+                docker logs coolify --tail 50
+                exit 1
+              fi
+              
+              # Display status
+              echo "[$(date '+%Y-%m-%d %H:%M:%S')] Status Check:"
+              echo "  ✓ Tunnel: Active - $(cat tunnel.url)"
+              echo "  ✓ Coolify: $health"
+              echo "  ✓ Branch: ${{ inputs.branch }}"
+              echo "  ✓ Containers: $(docker ps --filter 'name=coolify' --format '{{.Names}}' | wc -l) running"
+            else
+              echo "❌ Coolify container not found!"
+              docker ps -a
+              exit 1
+            fi
+            
+            echo "---"
+            sleep 60
           done
 
-      - name: Cleanup
-        if: always()
+      - name: Cleanup on failure
+        if: failure()
         run: |
-          echo "Shutting down..."
-          if [ ! -z "${{ env.TUNNEL_PID }}" ]; then
-            kill ${{ env.TUNNEL_PID }} 2>/dev/null || true
+          echo "Cleaning up after failure..."
+          
+          # Kill tunnel
+          if [ -f tunnel.pid ]; then
+            kill $(cat tunnel.pid) 2>/dev/null || true
           fi
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v
-          echo "✅ Cleanup complete"
-
-      - name: Show tunnel logs
-        if: always()
-        run: |
-          if [ -f tunnel.log ]; then
-            echo "Cloudflare Tunnel logs:"
-            cat tunnel.log
-          fi
-
-      - name: Show application logs
-        if: always()
-        run: |
-          echo "Coolify application logs:"
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml logs coolify | tail -100
+          
+          echo ""
+          echo "=== Tunnel Logs ==="
+          cat tunnel.log 2>/dev/null || echo "No tunnel logs"
+          
+          echo ""
+          echo "=== Docker Containers ==="
+          docker ps -a
+          
+          echo ""
+          echo "=== Coolify Logs ==="
+          docker logs coolify --tail 100 2>/dev/null || echo "No Coolify logs"
+          
+          echo ""
+          echo "=== All Container Logs ==="
+          for container in $(docker ps -a --format '{{.Names}}'); do
+            echo "--- Logs for $container ---"
+            docker logs $container --tail 50 2>&1 || true
+            echo ""
+          done
