@@ -79,9 +79,10 @@ jobs:
           echo "Installing PHP dependencies inside container..."
           # Run composer as root to avoid permission issues, then fix ownership
           docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T -u root coolify bash -c "
-            git config --global --add safe.directory /var/www/html &&
-            composer install --no-interaction --prefer-dist --optimize-autoloader &&
-            chown -R www-data:www-data /var/www/html/vendor
+            set -e
+            git config --global --add safe.directory /var/www/html
+            composer install --no-interaction --prefer-dist --optimize-autoloader
+            chown -R www-data:www-data /var/www/html/vendor /var/www/html/bootstrap/cache
           "
           echo "✅ Composer dependencies installed"
           # Restart the container to ensure all services start with correct permissions
