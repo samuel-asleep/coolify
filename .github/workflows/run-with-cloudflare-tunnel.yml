@@ -2,6 +2,17 @@ name: Run Coolify with Cloudflare Quick Tunnel
 
 on:
   workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to deploy'
+        required: true
+        default: 'v4.x'
+        type: string
+      tunnel_duration:
+        description: 'How long to keep tunnel alive (minutes)'
+        required: false
+        default: '30'
+        type: number
   push:
     branches:
       - copilot/create-github-actions-workflow-again
@@ -18,6 +29,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
+          ref: ${{ inputs.branch || github.ref }}
           persist-credentials: false
 
       - name: Set up environment file
@@ -27,35 +39,57 @@ jobs:
           echo "APP_KEY=base64:$(openssl rand -base64 32)" >> .env
           # Update DB_HOST for docker network
           sed -i 's/DB_HOST=host.docker.internal/DB_HOST=postgres/g' .env
-          cat .env
+          # Add missing environment variables
+          cat >> .env << 'EOF'
+          PUSHER_HOST=soketi
+          PUSHER_PORT=6001
+          PUSHER_SCHEME=http
+          REDIS_HOST=redis
+          REDIS_PORT=6379
+          MINIO_ACCESS_KEY=minioadmin
+          MINIO_SECRET_KEY=minioadmin
+          EOF
+          echo "✅ Environment file configured"
+
+      - name: Install PHP dependencies
+        run: |
+          composer install --no-interaction --prefer-dist --optimize-autoloader
+          echo "✅ Composer dependencies installed"
 
       - name: Build Docker images
         run: |
-          docker compose -f docker-compose.dev.yml build --no-cache coolify soketi
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml build coolify soketi
+          echo "✅ Docker images built"
 
       - name: Start services
         run: |
-          docker compose -f docker-compose.dev.yml up -d postgres redis minio
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis minio
           echo "Waiting for services to be healthy..."
           sleep 15
+          echo "✅ Database services started"
 
       - name: Start Coolify application
         run: |
-          docker compose -f docker-compose.dev.yml up -d coolify soketi
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d coolify soketi
           echo "Waiting for Coolify to start..."
           sleep 20
+          echo "✅ Coolify application started"
 
       - name: Check service status
         run: |
-          docker compose -f docker-compose.dev.yml ps
-          echo "Checking Coolify health..."
-          docker compose -f docker-compose.dev.yml logs coolify | tail -50
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
+          echo "Checking Coolify logs..."
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml logs coolify | tail -30
 
       - name: Run migrations and seed database
         run: |
           echo "Running migrations and seeders..."
-          docker compose -f docker-compose.dev.yml exec -T coolify php artisan migrate --force --seed
-          echo "Database setup complete"
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T coolify php artisan migrate --force --seed || {
+            echo "Migration failed, checking logs..."
+            docker compose -f docker-compose.yml -f docker-compose.dev.yml logs coolify | tail -50
+            exit 1
+          }
+          echo "✅ Database setup complete"
 
       - name: Install Cloudflare Tunnel (cloudflared)
         run: |
@@ -98,20 +132,21 @@ jobs:
           echo "🌐 Public URL: ${{ env.TUNNEL_URL }}"
           echo "🔐 Default Login: test@example.com"
           echo "🔑 Default Password: password"
+          echo "🌿 Branch: ${{ inputs.branch || github.ref_name }}"
           echo ""
           echo "================================================"
           echo ""
-          echo "The application will remain accessible for the duration of this workflow."
-          echo "To keep it running longer, increase the timeout-minutes value."
+          echo "The application will remain accessible for ${{ inputs.tunnel_duration || 30 }} minutes."
 
       - name: Keep tunnel alive
         run: |
-          echo "Keeping tunnel alive for 30 minutes..."
+          DURATION=${{ inputs.tunnel_duration || 30 }}
+          echo "Keeping tunnel alive for ${DURATION} minutes..."
           echo "You can access Coolify at: ${{ env.TUNNEL_URL }}"
           
           # Keep the tunnel alive and periodically check status
-          for i in {1..30}; do
-            echo "[$i/30] Tunnel still active at: ${{ env.TUNNEL_URL }}"
+          for i in $(seq 1 ${DURATION}); do
+            echo "[$i/${DURATION}] Tunnel still active at: ${{ env.TUNNEL_URL }}"
             sleep 60
             
             # Check if tunnel process is still running
@@ -131,8 +166,8 @@ jobs:
           if [ ! -z "${{ env.TUNNEL_PID }}" ]; then
             kill ${{ env.TUNNEL_PID }} 2>/dev/null || true
           fi
-          docker compose -f docker-compose.dev.yml down -v
-          echo "Cleanup complete"
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v
+          echo "✅ Cleanup complete"
 
       - name: Show tunnel logs
         if: always()
@@ -146,4 +181,4 @@ jobs:
         if: always()
         run: |
           echo "Coolify application logs:"
-          docker compose -f docker-compose.dev.yml logs coolify | tail -100
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml logs coolify | tail -100
