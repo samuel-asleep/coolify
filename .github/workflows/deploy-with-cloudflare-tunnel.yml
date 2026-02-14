@@ -1,0 +1,294 @@
+name: Deploy App with Cloudflare Tunnel
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to deploy'
+        required: true
+        default: 'v4.x'
+        type: string
+
+jobs:
+  deploy:
+    name: Build and Deploy Coolify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: coolify
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: coolify
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U coolify -d coolify"
+          --health-interval 5s
+          --health-timeout 2s
+          --health-retries 10
+      
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 2s
+          --health-retries 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Set up PHP 8.4
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, xml, ctype, iconv, intl, pdo, pdo_pgsql, dom, filter, gd, json, mbstring, pdo, redis
+          coverage: none
+          tools: composer:v2
+
+      - name: Verify PHP version
+        run: |
+          php --version
+          composer --version
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Verify Node.js version
+        run: |
+          node --version
+          npm --version
+
+      - name: Copy environment file
+        run: |
+          cp .env.development.example .env
+          echo "Environment file created"
+
+      - name: Update environment variables
+        run: |
+          # Update database connection to use GitHub Actions service
+          sed -i 's/DB_HOST=host.docker.internal/DB_HOST=127.0.0.1/' .env
+          sed -i 's/APP_PORT=8000/APP_PORT=8080/' .env
+          # Disable services we don't need for this test
+          echo "RAY_ENABLED=false" >> .env
+          echo "TELESCOPE_ENABLED=false" >> .env
+          cat .env
+          
+      - name: Get Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: ${{ runner.os }}-composer-
+
+      - name: Install Composer dependencies
+        run: |
+          composer install --no-interaction --prefer-dist --optimize-autoloader --no-progress
+          echo "✓ Composer dependencies installed"
+
+      - name: Install npm dependencies
+        run: |
+          npm ci
+          echo "✓ npm dependencies installed"
+
+      - name: Build frontend assets
+        run: |
+          npm run build
+          echo "✓ Frontend assets built"
+
+      - name: Generate application key
+        run: |
+          php artisan key:generate --ansi --force
+          echo "✓ Application key generated"
+
+      - name: Directory Permissions
+        run: |
+          chmod -R 775 storage bootstrap/cache
+          echo "✓ Directory permissions set"
+
+      - name: Run database migrations
+        run: |
+          php artisan migrate --force --no-interaction
+          echo "✓ Database migrations completed"
+
+      - name: Optimize application
+        run: |
+          php artisan config:cache
+          php artisan route:cache
+          php artisan view:cache
+          echo "✓ Application optimized"
+
+      - name: Install Cloudflare Tunnel (cloudflared)
+        run: |
+          # Download and install cloudflared
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          cloudflared --version
+          echo "✓ Cloudflared installed"
+
+      - name: Start Laravel application
+        run: |
+          # Start the Laravel development server in the background
+          php artisan serve --host=0.0.0.0 --port=8080 &
+          SERVER_PID=$!
+          echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
+          
+          # Wait for the server to be ready
+          echo "Waiting for Laravel server to start..."
+          max_attempts=30
+          attempt=0
+          while ! nc -z localhost 8080; do
+            attempt=$((attempt + 1))
+            if [ $attempt -ge $max_attempts ]; then
+              echo "✗ Server failed to start within timeout"
+              exit 1
+            fi
+            echo "Attempt $attempt/$max_attempts: Waiting for server..."
+            sleep 2
+          done
+          echo "✓ Laravel server started on port 8080 (PID: $SERVER_PID)"
+
+      - name: Verify application is running
+        run: |
+          # Test the health endpoint
+          response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/api/health || echo "000")
+          if [ "$response" = "200" ]; then
+            echo "✓ Application is healthy (HTTP $response)"
+          else
+            echo "⚠ Application health check returned HTTP $response"
+            # Show server logs for debugging
+            echo "Server logs:"
+            tail -50 storage/logs/laravel.log || echo "No logs available"
+          fi
+
+      - name: Start Cloudflare Quick Tunnel
+        run: |
+          # Start cloudflared tunnel in the background
+          cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
+          TUNNEL_PID=$!
+          echo "TUNNEL_PID=$TUNNEL_PID" >> $GITHUB_ENV
+          
+          # Wait for tunnel URL to be available
+          echo "Waiting for Cloudflare tunnel to start..."
+          max_attempts=30
+          attempt=0
+          tunnel_url=""
+          
+          while [ -z "$tunnel_url" ] && [ $attempt -lt $max_attempts ]; do
+            attempt=$((attempt + 1))
+            sleep 2
+            
+            # Extract tunnel URL from logs
+            if [ -f tunnel.log ]; then
+              tunnel_url=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' tunnel.log | head -1)
+            fi
+            
+            if [ -z "$tunnel_url" ]; then
+              echo "Attempt $attempt/$max_attempts: Waiting for tunnel URL..."
+            fi
+          done
+          
+          if [ -n "$tunnel_url" ]; then
+            echo "✓ Cloudflare tunnel started successfully!"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🌐 Application is accessible at: $tunnel_url"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "TUNNEL_URL=$tunnel_url" >> $GITHUB_ENV
+            
+            # Also save to a summary
+            echo "### 🚀 Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Your Coolify application is now running and accessible via Cloudflare Quick Tunnel:" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**🔗 Public URL:** [$tunnel_url]($tunnel_url)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**⏱ Duration:** The application will run for up to 30 minutes (workflow timeout)" >> $GITHUB_STEP_SUMMARY
+            echo "**📋 Branch:** \`${{ inputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✗ Failed to start Cloudflare tunnel"
+            cat tunnel.log
+            exit 1
+          fi
+
+      - name: Keep application running
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Application is running and accessible at: $TUNNEL_URL"
+          echo "The workflow will continue running for the remainder of the 30-minute timeout."
+          echo "Press 'Cancel workflow' in GitHub Actions to stop it early."
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Calculate remaining time (30 minutes total - time elapsed so far)
+          start_time=$SECONDS
+          max_duration=$((30 * 60))  # 30 minutes in seconds
+          
+          while true; do
+            elapsed=$((SECONDS - start_time))
+            remaining=$((max_duration - elapsed))
+            
+            if [ $remaining -le 0 ]; then
+              echo "⏰ Maximum runtime of 30 minutes reached. Shutting down..."
+              break
+            fi
+            
+            # Show status every minute
+            if [ $((elapsed % 60)) -eq 0 ]; then
+              minutes_remaining=$((remaining / 60))
+              echo "⏱ Application still running... ($minutes_remaining minutes remaining)"
+              echo "   URL: $TUNNEL_URL"
+              
+              # Verify application is still responding
+              response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/api/health || echo "000")
+              if [ "$response" != "200" ]; then
+                echo "⚠ Warning: Application health check failed (HTTP $response)"
+              fi
+            fi
+            
+            sleep 10
+          done
+          
+          echo "✓ Workflow completed"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up processes..."
+          
+          # Stop cloudflared tunnel
+          if [ ! -z "$TUNNEL_PID" ]; then
+            kill $TUNNEL_PID 2>/dev/null || true
+            echo "✓ Cloudflare tunnel stopped"
+          fi
+          
+          # Stop Laravel server
+          if [ ! -z "$SERVER_PID" ]; then
+            kill $SERVER_PID 2>/dev/null || true
+            echo "✓ Laravel server stopped"
+          fi
+          
+          # Show final logs if available
+          if [ -f tunnel.log ]; then
+            echo "Tunnel logs:"
+            tail -20 tunnel.log
+          fi
+          
+          if [ -f storage/logs/laravel.log ]; then
+            echo "Application logs:"
+            tail -50 storage/logs/laravel.log
+          fi
