@@ -1,0 +1,564 @@
+name: Deploy with Quick Tunnel
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to deploy'
+        required: true
+        type: string
+      APP_PORT:
+        description: 'Application port'
+        required: false
+        default: '3000'
+        type: string
+      HEALTHCHECK_PATH:
+        description: 'Health check path'
+        required: false
+        default: '/health'
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Detect runtime and configuration
+        id: detect
+        run: |
+          echo "🔍 Detecting project runtime..."
+          
+          # Initialize variables
+          RUNTIME="unknown"
+          MIGRATE_CMD=""
+          START_CMD=""
+          INSTALL_CMD=""
+          
+          # Detect Node.js
+          if [ -f "package.json" ]; then
+            echo "✅ Detected Node.js project"
+            RUNTIME="node"
+            
+            # Check for migration scripts
+            if grep -q '"migrate"' package.json; then
+              MIGRATE_CMD="npm run migrate"
+              echo "  - Found migration script: npm run migrate"
+            elif grep -q '"db:migrate"' package.json; then
+              MIGRATE_CMD="npm run db:migrate"
+              echo "  - Found migration script: npm run db:migrate"
+            fi
+            
+            # Check for start scripts
+            if grep -q '"start"' package.json; then
+              START_CMD="npm start"
+            elif grep -q '"dev"' package.json; then
+              START_CMD="npm run dev"
+            fi
+            
+            # Check for package manager
+            if [ -f "package-lock.json" ]; then
+              INSTALL_CMD="npm ci"
+            elif [ -f "yarn.lock" ]; then
+              INSTALL_CMD="yarn install --frozen-lockfile"
+            elif [ -f "pnpm-lock.yaml" ]; then
+              INSTALL_CMD="pnpm install --frozen-lockfile"
+            else
+              INSTALL_CMD="npm install"
+            fi
+          fi
+          
+          # Detect Go
+          if [ -f "go.mod" ]; then
+            echo "✅ Detected Go project"
+            RUNTIME="go"
+            
+            if [ -f "Makefile" ]; then
+              if grep -q "migrate:" Makefile; then
+                MIGRATE_CMD="make migrate"
+                echo "  - Found migration script: make migrate"
+              fi
+              if grep -q "run:" Makefile; then
+                START_CMD="make run"
+              elif grep -q "start:" Makefile; then
+                START_CMD="make start"
+              fi
+            fi
+            
+            if [ -z "$START_CMD" ]; then
+              START_CMD="go run ."
+            fi
+          fi
+          
+          # Detect Python
+          if [ -f "requirements.txt" ] || [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
+            echo "✅ Detected Python project"
+            RUNTIME="python"
+            
+            # Check for migration scripts
+            if [ -f "manage.py" ]; then
+              MIGRATE_CMD="python manage.py migrate"
+              START_CMD="python manage.py runserver 0.0.0.0:${{ inputs.APP_PORT }}"
+              echo "  - Detected Django project"
+            elif [ -f "alembic.ini" ]; then
+              MIGRATE_CMD="alembic upgrade head"
+              echo "  - Found Alembic migrations"
+            fi
+            
+            if [ -z "$START_CMD" ]; then
+              if [ -f "app.py" ]; then
+                START_CMD="python app.py"
+              elif [ -f "main.py" ]; then
+                START_CMD="python main.py"
+              elif grep -q "uvicorn" requirements.txt 2>/dev/null; then
+                START_CMD="uvicorn main:app --host 0.0.0.0 --port ${{ inputs.APP_PORT }}"
+              else
+                START_CMD="python -m flask run --host=0.0.0.0 --port=${{ inputs.APP_PORT }}"
+              fi
+            fi
+            
+            if [ -f "requirements.txt" ]; then
+              INSTALL_CMD="pip install -r requirements.txt"
+            elif [ -f "pyproject.toml" ]; then
+              INSTALL_CMD="pip install ."
+            fi
+          fi
+          
+          # Detect PHP/Laravel
+          if [ -f "composer.json" ]; then
+            echo "✅ Detected PHP project"
+            RUNTIME="php"
+            INSTALL_CMD="composer install --no-interaction --prefer-dist"
+            
+            if [ -f "artisan" ]; then
+              MIGRATE_CMD="php artisan migrate --force"
+              START_CMD="php artisan serve --host=0.0.0.0 --port=${{ inputs.APP_PORT }}"
+              echo "  - Detected Laravel project"
+            else
+              START_CMD="php -S 0.0.0.0:${{ inputs.APP_PORT }}"
+            fi
+          fi
+          
+          # Detect Ruby
+          if [ -f "Gemfile" ]; then
+            echo "✅ Detected Ruby project"
+            RUNTIME="ruby"
+            INSTALL_CMD="bundle install"
+            
+            if [ -f "Rakefile" ] && grep -q "db:migrate" Rakefile; then
+              MIGRATE_CMD="bundle exec rake db:migrate"
+              echo "  - Found Rails migrations"
+            fi
+            
+            if [ -f "config.ru" ]; then
+              START_CMD="bundle exec rackup -o 0.0.0.0 -p ${{ inputs.APP_PORT }}"
+            fi
+          fi
+          
+          # Save detected values
+          echo "runtime=$RUNTIME" >> $GITHUB_OUTPUT
+          echo "migrate_cmd=$MIGRATE_CMD" >> $GITHUB_OUTPUT
+          echo "start_cmd=$START_CMD" >> $GITHUB_OUTPUT
+          echo "install_cmd=$INSTALL_CMD" >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "📋 Detection Summary:"
+          echo "  Runtime: $RUNTIME"
+          echo "  Install: $INSTALL_CMD"
+          echo "  Migrate: ${MIGRATE_CMD:-none}"
+          echo "  Start: $START_CMD"
+          
+          if [ "$RUNTIME" = "unknown" ]; then
+            echo "❌ Could not detect project runtime"
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        if: steps.detect.outputs.runtime == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Go
+        if: steps.detect.outputs.runtime == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Setup Python
+        if: steps.detect.outputs.runtime == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup PHP
+        if: steps.detect.outputs.runtime == 'php'
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, xml, ctype, json, pgsql, redis, bcmath
+          coverage: none
+
+      - name: Setup Ruby
+        if: steps.detect.outputs.runtime == 'ruby'
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+
+      - name: Check for docker-compose
+        id: docker_compose_check
+        run: |
+          if [ -f "docker-compose.yml" ] || [ -f "docker-compose.yaml" ]; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "✅ Found docker-compose file"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  No docker-compose file found, will use service containers"
+          fi
+
+      - name: Start services with docker-compose
+        if: steps.docker_compose_check.outputs.found == 'true'
+        run: |
+          echo "🐳 Starting Postgres and Redis with docker-compose..."
+          
+          # Create a minimal docker-compose override for just postgres and redis
+          cat > docker-compose.quicktunnel.yml <<EOF
+          services:
+            postgres:
+              image: postgres:16-alpine
+              ports:
+                - "5432:5432"
+              environment:
+                POSTGRES_USER: quicktunnel
+                POSTGRES_PASSWORD: quicktunnel
+                POSTGRES_DB: quicktunnel
+              healthcheck:
+                test: ["CMD-SHELL", "pg_isready -U quicktunnel"]
+                interval: 5s
+                retries: 10
+                timeout: 2s
+            redis:
+              image: redis:7-alpine
+              ports:
+                - "6379:6379"
+              healthcheck:
+                test: ["CMD", "redis-cli", "ping"]
+                interval: 5s
+                retries: 10
+                timeout: 2s
+          EOF
+          
+          docker-compose -f docker-compose.quicktunnel.yml up -d
+          
+          echo "⏳ Waiting for services to be healthy..."
+          timeout=60
+          elapsed=0
+          while [ $elapsed -lt $timeout ]; do
+            if docker-compose -f docker-compose.quicktunnel.yml ps | grep -q "healthy"; then
+              pg_healthy=$(docker-compose -f docker-compose.quicktunnel.yml ps postgres | grep -c "healthy" || echo "0")
+              redis_healthy=$(docker-compose -f docker-compose.quicktunnel.yml ps redis | grep -c "healthy" || echo "0")
+              
+              if [ "$pg_healthy" -gt 0 ] && [ "$redis_healthy" -gt 0 ]; then
+                echo "✅ All services are healthy!"
+                break
+              fi
+            fi
+            sleep 2
+            elapsed=$((elapsed + 2))
+          done
+          
+          if [ $elapsed -ge $timeout ]; then
+            echo "❌ Services did not become healthy in time"
+            docker-compose -f docker-compose.quicktunnel.yml logs
+            exit 1
+          fi
+          
+          echo "📊 Service status:"
+          docker-compose -f docker-compose.quicktunnel.yml ps
+
+      - name: Set database and redis URLs (docker-compose)
+        if: steps.docker_compose_check.outputs.found == 'true'
+        run: |
+          echo "DATABASE_URL=postgresql://quicktunnel:quicktunnel@localhost:5432/quicktunnel" >> $GITHUB_ENV
+          echo "REDIS_URL=redis://localhost:6379/0" >> $GITHUB_ENV
+          echo "DB_CONNECTION=pgsql" >> $GITHUB_ENV
+          echo "DB_HOST=localhost" >> $GITHUB_ENV
+          echo "DB_PORT=5432" >> $GITHUB_ENV
+          echo "DB_DATABASE=quicktunnel" >> $GITHUB_ENV
+          echo "DB_USERNAME=quicktunnel" >> $GITHUB_ENV
+          echo "DB_PASSWORD=quicktunnel" >> $GITHUB_ENV
+          echo "REDIS_HOST=localhost" >> $GITHUB_ENV
+          echo "REDIS_PORT=6379" >> $GITHUB_ENV
+          echo "✅ Database and Redis URLs configured for docker-compose"
+
+      - name: Set database and redis URLs (service containers)
+        if: steps.docker_compose_check.outputs.found == 'false'
+        run: |
+          echo "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres" >> $GITHUB_ENV
+          echo "REDIS_URL=redis://localhost:6379/0" >> $GITHUB_ENV
+          echo "DB_CONNECTION=pgsql" >> $GITHUB_ENV
+          echo "DB_HOST=localhost" >> $GITHUB_ENV
+          echo "DB_PORT=5432" >> $GITHUB_ENV
+          echo "DB_DATABASE=postgres" >> $GITHUB_ENV
+          echo "DB_USERNAME=postgres" >> $GITHUB_ENV
+          echo "DB_PASSWORD=postgres" >> $GITHUB_ENV
+          echo "REDIS_HOST=localhost" >> $GITHUB_ENV
+          echo "REDIS_PORT=6379" >> $GITHUB_ENV
+          echo "✅ Database and Redis URLs configured for service containers"
+
+      - name: Install dependencies
+        if: steps.detect.outputs.install_cmd != ''
+        run: |
+          echo "📦 Installing dependencies..."
+          ${{ steps.detect.outputs.install_cmd }}
+
+      - name: Run migrations
+        if: steps.detect.outputs.migrate_cmd != ''
+        run: |
+          echo "🔄 Running database migrations..."
+          ${{ steps.detect.outputs.migrate_cmd }}
+          echo "✅ Migrations completed"
+
+      - name: Start application
+        id: start_app
+        run: |
+          echo "🚀 Starting application on port ${{ inputs.APP_PORT }}..."
+          
+          # Set PORT environment variable for apps that use it
+          export PORT=${{ inputs.APP_PORT }}
+          
+          # Start the app in background
+          nohup ${{ steps.detect.outputs.start_cmd }} > app.log 2>&1 &
+          APP_PID=$!
+          echo "app_pid=$APP_PID" >> $GITHUB_OUTPUT
+          
+          echo "  Process ID: $APP_PID"
+          echo "  Logs: app.log"
+
+      - name: Wait for application health check
+        run: |
+          echo "🏥 Waiting for application to become healthy..."
+          echo "  Checking: http://localhost:${{ inputs.APP_PORT }}${{ inputs.HEALTHCHECK_PATH }}"
+          
+          max_attempts=60
+          attempt=0
+          
+          while [ $attempt -lt $max_attempts ]; do
+            attempt=$((attempt + 1))
+            
+            if curl -sf "http://localhost:${{ inputs.APP_PORT }}${{ inputs.HEALTHCHECK_PATH }}" > /dev/null 2>&1; then
+              echo "✅ Application is healthy! (attempt $attempt/$max_attempts)"
+              exit 0
+            fi
+            
+            if [ $((attempt % 10)) -eq 0 ]; then
+              echo "  ⏳ Still waiting... (attempt $attempt/$max_attempts)"
+              echo "  Recent logs:"
+              tail -n 10 app.log || echo "  No logs available yet"
+            fi
+            
+            sleep 2
+          done
+          
+          echo "❌ Application did not become healthy within timeout"
+          echo ""
+          echo "📋 Full application logs:"
+          cat app.log || echo "No logs available"
+          exit 1
+
+      - name: Install Cloudflare Quick Tunnel
+        run: |
+          echo "☁️  Installing Cloudflare Quick Tunnel..."
+          
+          # Download cloudflared
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          
+          # Verify installation
+          cloudflared --version
+          echo "✅ Cloudflared installed successfully"
+
+      - name: Start Quick Tunnel
+        id: tunnel
+        run: |
+          echo "🌐 Starting Cloudflare Quick Tunnel..."
+          echo "  Target: http://localhost:${{ inputs.APP_PORT }}"
+          
+          # Start cloudflared tunnel in background
+          nohup cloudflared tunnel --url "http://localhost:${{ inputs.APP_PORT }}" > tunnel.log 2>&1 &
+          TUNNEL_PID=$!
+          echo "tunnel_pid=$TUNNEL_PID" >> $GITHUB_OUTPUT
+          
+          echo "  Process ID: $TUNNEL_PID"
+          echo "  Waiting for tunnel URL..."
+          
+          # Wait for tunnel to start and extract URL
+          max_attempts=30
+          attempt=0
+          
+          while [ $attempt -lt $max_attempts ]; do
+            attempt=$((attempt + 1))
+            
+            if [ -f tunnel.log ]; then
+              # Look for the tunnel URL in the logs
+              TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' tunnel.log | head -n 1)
+              
+              if [ -n "$TUNNEL_URL" ]; then
+                echo "✅ Tunnel URL found: $TUNNEL_URL"
+                echo "url=$TUNNEL_URL" >> $GITHUB_OUTPUT
+                exit 0
+              fi
+            fi
+            
+            if [ $((attempt % 5)) -eq 0 ]; then
+              echo "  ⏳ Still waiting for tunnel URL... (attempt $attempt/$max_attempts)"
+            fi
+            
+            sleep 2
+          done
+          
+          echo "❌ Could not extract tunnel URL"
+          echo ""
+          echo "📋 Tunnel logs:"
+          cat tunnel.log || echo "No tunnel logs available"
+          exit 1
+
+      - name: Verify public tunnel
+        run: |
+          echo "🔍 Verifying public tunnel access..."
+          echo "  URL: ${{ steps.tunnel.outputs.url }}${{ inputs.HEALTHCHECK_PATH }}"
+          
+          # Give tunnel a moment to stabilize
+          sleep 3
+          
+          max_attempts=10
+          attempt=0
+          
+          while [ $attempt -lt $max_attempts ]; do
+            attempt=$((attempt + 1))
+            
+            if response=$(curl -sf "${{ steps.tunnel.outputs.url }}${{ inputs.HEALTHCHECK_PATH }}" 2>&1); then
+              echo "✅ Public tunnel verification successful!"
+              echo ""
+              echo "📋 Response:"
+              echo "$response"
+              exit 0
+            fi
+            
+            echo "  ⏳ Attempt $attempt/$max_attempts failed, retrying..."
+            sleep 3
+          done
+          
+          echo "❌ Public tunnel verification failed"
+          echo ""
+          echo "📋 Application logs:"
+          tail -n 50 app.log || echo "No app logs"
+          echo ""
+          echo "📋 Tunnel logs:"
+          tail -n 50 tunnel.log || echo "No tunnel logs"
+          exit 1
+
+      - name: Display deployment summary
+        if: always()
+        run: |
+          echo "======================================"
+          echo "       DEPLOYMENT SUMMARY"
+          echo "======================================"
+          echo ""
+          echo "🌐 Public URL: ${{ steps.tunnel.outputs.url }}"
+          echo "🔗 Health Check: ${{ steps.tunnel.outputs.url }}${{ inputs.HEALTHCHECK_PATH }}"
+          echo "🐙 Branch: ${{ inputs.branch }}"
+          echo "🚪 Port: ${{ inputs.APP_PORT }}"
+          echo ""
+          echo "======================================"
+
+      - name: Keep tunnel alive
+        run: |
+          echo "⏰ Keeping tunnel and app running for 10 minutes..."
+          echo "   You can access your app at: ${{ steps.tunnel.outputs.url }}"
+          echo ""
+          
+          # Monitor for 10 minutes
+          end_time=$(($(date +%s) + 600))
+          
+          while [ $(date +%s) -lt $end_time ]; do
+            remaining=$((end_time - $(date +%s)))
+            minutes=$((remaining / 60))
+            seconds=$((remaining % 60))
+            
+            # Check if app is still running
+            if ! kill -0 ${{ steps.start_app.outputs.app_pid }} 2>/dev/null; then
+              echo "⚠️  Application process died!"
+              echo "📋 Recent application logs:"
+              tail -n 50 app.log
+              exit 1
+            fi
+            
+            # Check if tunnel is still running
+            if ! kill -0 ${{ steps.tunnel.outputs.tunnel_pid }} 2>/dev/null; then
+              echo "⚠️  Tunnel process died!"
+              echo "📋 Recent tunnel logs:"
+              tail -n 50 tunnel.log
+              exit 1
+            fi
+            
+            # Print status every 30 seconds
+            if [ $((remaining % 30)) -eq 0 ]; then
+              echo "  ⏱️  Time remaining: ${minutes}m ${seconds}s"
+            fi
+            
+            sleep 5
+          done
+          
+          echo "✅ Tunnel session completed successfully"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "🧹 Cleaning up..."
+          
+          # Stop tunnel
+          if [ -n "${{ steps.tunnel.outputs.tunnel_pid }}" ]; then
+            kill ${{ steps.tunnel.outputs.tunnel_pid }} 2>/dev/null || true
+          fi
+          
+          # Stop app
+          if [ -n "${{ steps.start_app.outputs.app_pid }}" ]; then
+            kill ${{ steps.start_app.outputs.app_pid }} 2>/dev/null || true
+          fi
+          
+          # Stop docker-compose services
+          if [ -f "docker-compose.quicktunnel.yml" ]; then
+            docker-compose -f docker-compose.quicktunnel.yml down -v
+          fi
+          
+          echo "✅ Cleanup completed"
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 2s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 2s
+          --health-retries 10
