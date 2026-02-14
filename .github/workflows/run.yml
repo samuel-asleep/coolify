@@ -46,7 +46,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl jq git
+          sudo apt-get install -y curl jq git rsync
 
       - name: Download and install Cloudflared
         run: |
@@ -65,8 +65,12 @@ jobs:
           sudo mkdir -p /data/coolify/services
           sudo mkdir -p /data/coolify/proxy/dynamic
           
+          # Set ownership to current user BEFORE copying files
           sudo chown -R $USER:$USER /data/coolify
-          sudo chmod -R 700 /data/coolify
+          sudo chmod -R 755 /data/coolify
+          
+          echo "Directories created with proper permissions"
+          ls -la /data/ | grep coolify
 
       - name: Configure Docker daemon
         run: |
@@ -92,19 +96,30 @@ jobs:
         run: |
           echo "Copying repository files to /data/coolify/source..."
           
+          # Verify we have access
+          ls -ld /data/coolify/source
+          
           # Copy all files from the repo to the source directory
-          cp -r ./* /data/coolify/source/ 2>/dev/null || true
-          cp -r ./.* /data/coolify/source/ 2>/dev/null || true
+          # Use rsync for better handling of hidden files
+          rsync -av --exclude='.git' ./ /data/coolify/source/
+          
+          # Verify the copy
+          echo "Files copied. Checking for required files..."
+          ls -la /data/coolify/source/
           
           # Ensure docker-compose files exist
           if [ ! -f /data/coolify/source/docker-compose.yml ]; then
             echo "ERROR: docker-compose.yml not found in repository"
+            echo "Available files:"
+            find /data/coolify/source -name "*.yml" -o -name "*.yaml"
             exit 1
           fi
           
           if [ ! -f /data/coolify/source/docker-compose.prod.yml ]; then
             echo "WARNING: docker-compose.prod.yml not found, will use main compose file only"
           fi
+          
+          echo "Repository copied successfully!"
 
       - name: Set up environment variables
         env:
@@ -220,14 +235,23 @@ jobs:
             cat /data/coolify/ssh/keys/id.root@host.docker.internal.pub >> ~/.ssh/authorized_keys
           fi
           
-          sudo chown -R 9999:root /data/coolify 2>/dev/null || true
-          sudo chmod -R 700 /data/coolify
+          # Set proper ownership for Docker (UID 9999)
+          # But first ensure current user can access
+          chmod -R 755 /data/coolify/ssh
+          sudo chown -R 9999:root /data/coolify/ssh 2>/dev/null || true
 
       - name: Build Docker images from source
         run: |
+          # Verify access to source directory
+          ls -ld /data/coolify/source
+          
+          # Change to source directory (should work now with proper permissions)
           cd /data/coolify/source
           
           echo "Building Coolify Docker images from source..."
+          echo "Current directory: $(pwd)"
+          echo "Files present:"
+          ls -la
           
           # Check if there's a Dockerfile in the repo
           if [ -f Dockerfile ]; then
@@ -243,22 +267,29 @@ jobs:
           # Build using docker-compose
           if [ -f docker-compose.prod.yml ]; then
             echo "Building with docker-compose.prod.yml..."
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml build
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml build --no-cache
           else
             echo "Building with docker-compose.yml..."
-            docker compose -f docker-compose.yml build
+            docker compose -f docker-compose.yml build --no-cache
           fi
+          
+          echo "Build completed successfully!"
 
       - name: Start Coolify services
         run: |
+          # Verify access
+          ls -ld /data/coolify/source
           cd /data/coolify/source
           
           echo "Starting Coolify services..."
+          echo "Current directory: $(pwd)"
           
           # Start services
           if [ -f docker-compose.prod.yml ]; then
+            echo "Starting with docker-compose.prod.yml..."
             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
           else
+            echo "Starting with docker-compose.yml..."
             docker compose -f docker-compose.yml up -d
           fi
           
