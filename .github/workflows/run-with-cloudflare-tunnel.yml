@@ -15,7 +15,9 @@ on:
         type: number
   push:
     branches:
-      - copilot/create-github-actions-workflow-again
+      - main
+      - develop
+      - next
 
 permissions:
   contents: read
@@ -65,15 +67,30 @@ jobs:
         run: |
           docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis minio
           echo "Waiting for services to be healthy..."
-          sleep 15
-          echo "✅ Database services started"
+          # Wait for services with health checks
+          for i in {1..30}; do
+            if docker compose -f docker-compose.yml -f docker-compose.dev.yml ps | grep -q "(healthy)"; then
+              echo "✅ Database services are healthy"
+              break
+            fi
+            echo "Waiting for services to become healthy... ($i/30)"
+            sleep 2
+          done
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
 
       - name: Start Coolify application
         run: |
           docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d coolify soketi
           echo "Waiting for Coolify to start..."
-          sleep 20
-          echo "✅ Coolify application started"
+          # Wait for Coolify health check
+          for i in {1..60}; do
+            if curl -sf http://localhost:8000/api/health > /dev/null 2>&1; then
+              echo "✅ Coolify is healthy and ready"
+              break
+            fi
+            echo "Waiting for Coolify health check... ($i/60)"
+            sleep 2
+          done
 
       - name: Check service status
         run: |
@@ -106,15 +123,21 @@ jobs:
           TUNNEL_PID=$!
           echo "TUNNEL_PID=${TUNNEL_PID}" >> $GITHUB_ENV
           
-          # Wait for tunnel to establish and get URL
+          # Wait for tunnel to establish and get URL with retry logic
           echo "Waiting for tunnel to establish..."
-          sleep 10
-          
-          # Extract tunnel URL from logs
-          TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' tunnel.log | head -1 || echo "")
+          TUNNEL_URL=""
+          for i in {1..30}; do
+            TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' tunnel.log | head -1 || echo "")
+            if [ ! -z "$TUNNEL_URL" ]; then
+              echo "✅ Tunnel established successfully"
+              break
+            fi
+            echo "Waiting for tunnel URL... ($i/30)"
+            sleep 2
+          done
           
           if [ -z "$TUNNEL_URL" ]; then
-            echo "Failed to get tunnel URL, checking logs..."
+            echo "Failed to get tunnel URL after 60 seconds, checking logs..."
             cat tunnel.log
             exit 1
           fi
@@ -144,18 +167,20 @@ jobs:
           echo "Keeping tunnel alive for ${DURATION} minutes..."
           echo "You can access Coolify at: ${{ env.TUNNEL_URL }}"
           
+          CURRENT_TUNNEL_PID=${{ env.TUNNEL_PID }}
+          
           # Keep the tunnel alive and periodically check status
           for i in $(seq 1 ${DURATION}); do
             echo "[$i/${DURATION}] Tunnel still active at: ${{ env.TUNNEL_URL }}"
             sleep 60
             
             # Check if tunnel process is still running
-            if ! kill -0 ${{ env.TUNNEL_PID }} 2>/dev/null; then
+            if ! kill -0 ${CURRENT_TUNNEL_PID} 2>/dev/null; then
               echo "Tunnel process died, restarting..."
               nohup cloudflared tunnel --url http://localhost:8000 > tunnel.log 2>&1 &
-              TUNNEL_PID=$!
-              echo "TUNNEL_PID=${TUNNEL_PID}" >> $GITHUB_ENV
+              CURRENT_TUNNEL_PID=$!
               sleep 5
+              echo "Tunnel restarted with PID: ${CURRENT_TUNNEL_PID}"
             fi
           done
 
