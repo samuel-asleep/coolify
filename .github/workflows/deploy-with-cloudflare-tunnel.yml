@@ -71,6 +71,120 @@ jobs:
           node --version
           npm --version
 
+      - name: Check and setup PostgreSQL
+        id: postgres-setup
+        run: |
+          echo "Checking PostgreSQL availability..."
+
+          # First, try to connect to GitHub Actions service
+          if pg_isready -h 127.0.0.1 -p 5432 -U coolify -d coolify 2>/dev/null; then
+            echo "✓ GitHub Actions PostgreSQL service is available"
+            echo "DB_HOST=127.0.0.1" >> $GITHUB_ENV
+            echo "USING_SERVICE=true" >> $GITHUB_ENV
+          else
+            echo "⚠ GitHub Actions PostgreSQL service not available"
+            echo "Checking for local PostgreSQL installation..."
+
+            # Check if PostgreSQL is installed locally
+            if command -v psql &> /dev/null; then
+              echo "✓ Local PostgreSQL client found"
+
+              # Check if PostgreSQL service is running
+              if sudo systemctl is-active --quiet postgresql 2>/dev/null || sudo service postgresql status 2>/dev/null; then
+                echo "✓ Local PostgreSQL service is running"
+
+                # Try to create database and user
+                sudo -u postgres psql -c "CREATE DATABASE coolify;" 2>/dev/null || echo "Database may already exist"
+                sudo -u postgres psql -c "CREATE USER coolify WITH PASSWORD 'password';" 2>/dev/null || echo "User may already exist"
+                sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE coolify TO coolify;" 2>/dev/null
+                sudo -u postgres psql -c "ALTER DATABASE coolify OWNER TO coolify;" 2>/dev/null
+
+                echo "✓ Local PostgreSQL configured"
+                echo "DB_HOST=127.0.0.1" >> $GITHUB_ENV
+                echo "USING_SERVICE=false" >> $GITHUB_ENV
+              else
+                echo "✗ PostgreSQL service not running, attempting to start..."
+                sudo systemctl start postgresql || sudo service postgresql start
+                sleep 3
+
+                if sudo systemctl is-active --quiet postgresql 2>/dev/null || sudo service postgresql status 2>/dev/null; then
+                  echo "✓ PostgreSQL service started"
+
+                  # Setup database
+                  sudo -u postgres psql -c "CREATE DATABASE coolify;" 2>/dev/null || echo "Database may already exist"
+                  sudo -u postgres psql -c "CREATE USER coolify WITH PASSWORD 'password';" 2>/dev/null || echo "User may already exist"
+                  sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE coolify TO coolify;" 2>/dev/null
+                  sudo -u postgres psql -c "ALTER DATABASE coolify OWNER TO coolify;" 2>/dev/null
+
+                  echo "DB_HOST=127.0.0.1" >> $GITHUB_ENV
+                  echo "USING_SERVICE=false" >> $GITHUB_ENV
+                else
+                  echo "✗ Failed to start PostgreSQL service"
+                  exit 1
+                fi
+              fi
+            else
+              echo "✗ PostgreSQL not available"
+              exit 1
+            fi
+          fi
+
+          # Verify connection works
+          max_attempts=10
+          attempt=0
+          while [ $attempt -lt $max_attempts ]; do
+            if PGPASSWORD=password psql -h 127.0.0.1 -U coolify -d coolify -c "SELECT 1;" &>/dev/null; then
+              echo "✓ PostgreSQL connection verified"
+              break
+            fi
+            attempt=$((attempt + 1))
+            echo "Waiting for PostgreSQL... (attempt $attempt/$max_attempts)"
+            sleep 2
+          done
+
+          if [ $attempt -eq $max_attempts ]; then
+            echo "✗ Failed to connect to PostgreSQL"
+            exit 1
+          fi
+
+      - name: Check and setup Redis
+        id: redis-setup
+        run: |
+          echo "Checking Redis availability..."
+
+          # First, try GitHub Actions service
+          if redis-cli -h 127.0.0.1 -p 6379 ping 2>/dev/null | grep -q "PONG"; then
+            echo "✓ GitHub Actions Redis service is available"
+            echo "REDIS_HOST=127.0.0.1" >> $GITHUB_ENV
+          else
+            echo "⚠ GitHub Actions Redis service not available"
+            echo "Checking for local Redis installation..."
+
+            # Check if Redis is installed locally
+            if command -v redis-server &> /dev/null || command -v redis-cli &> /dev/null; then
+              echo "✓ Local Redis found"
+
+              # Try to start Redis if not running
+              if ! redis-cli ping 2>/dev/null | grep -q "PONG"; then
+                echo "Starting local Redis..."
+                redis-server --daemonize yes --port 6379 2>/dev/null || sudo systemctl start redis || sudo service redis start
+                sleep 2
+              fi
+
+              # Verify Redis is running
+              if redis-cli -h 127.0.0.1 -p 6379 ping 2>/dev/null | grep -q "PONG"; then
+                echo "✓ Local Redis is running"
+                echo "REDIS_HOST=127.0.0.1" >> $GITHUB_ENV
+              else
+                echo "⚠ Redis not responding, but continuing (not critical)"
+                echo "REDIS_HOST=127.0.0.1" >> $GITHUB_ENV
+              fi
+            else
+              echo "⚠ Redis not available, but continuing (not critical)"
+              echo "REDIS_HOST=127.0.0.1" >> $GITHUB_ENV
+            fi
+          fi
+
       - name: Copy environment file
         run: |
           cp .env.development.example .env
@@ -78,14 +192,21 @@ jobs:
 
       - name: Update environment variables
         run: |
-          # Update database connection to use GitHub Actions service
-          sed -i 's/DB_HOST=host.docker.internal/DB_HOST=127.0.0.1/' .env
+          # Update database connection
+          sed -i "s/DB_HOST=host.docker.internal/DB_HOST=${{ env.DB_HOST }}/" .env
           sed -i 's/APP_PORT=8000/APP_PORT=8080/' .env
+
+          # Update Redis if needed
+          if [ ! -z "${{ env.REDIS_HOST }}" ]; then
+            sed -i "s/REDIS_HOST=.*/REDIS_HOST=${{ env.REDIS_HOST }}/" .env
+          fi
+
           # Disable services we don't need for this test
           echo "RAY_ENABLED=false" >> .env
           echo "TELESCOPE_ENABLED=false" >> .env
+
+          echo "Environment configuration:"
           cat .env
-          
       - name: Get Composer cache directory
         id: composer-cache
         run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
@@ -269,25 +390,33 @@ jobs:
         if: always()
         run: |
           echo "Cleaning up processes..."
-          
+
           # Stop cloudflared tunnel
           if [ ! -z "$TUNNEL_PID" ]; then
             kill $TUNNEL_PID 2>/dev/null || true
             echo "✓ Cloudflare tunnel stopped"
           fi
-          
+
           # Stop Laravel server
           if [ ! -z "$SERVER_PID" ]; then
             kill $SERVER_PID 2>/dev/null || true
             echo "✓ Laravel server stopped"
           fi
-          
+
+          # Cleanup local PostgreSQL if we started it
+          if [ "${{ env.USING_SERVICE }}" = "false" ]; then
+            echo "Cleaning up local PostgreSQL database..."
+            PGPASSWORD=password psql -h 127.0.0.1 -U coolify -d postgres -c "DROP DATABASE IF EXISTS coolify;" 2>/dev/null || true
+            sudo -u postgres psql -c "DROP DATABASE IF EXISTS coolify;" 2>/dev/null || true
+            echo "✓ Local PostgreSQL database cleaned up"
+          fi
+
           # Show final logs if available
           if [ -f tunnel.log ]; then
             echo "Tunnel logs:"
             tail -20 tunnel.log
           fi
-          
+
           if [ -f storage/logs/laravel.log ]; then
             echo "Application logs:"
             tail -50 storage/logs/laravel.log

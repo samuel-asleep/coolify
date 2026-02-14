@@ -6,11 +6,13 @@ This GitHub Actions workflow automatically builds and deploys the Coolify applic
 
 - ✅ **Branch Selection**: Choose which branch to deploy via `workflow_dispatch`
 - ✅ **Full Build Process**: Complete PHP and Node.js build pipeline
-- ✅ **Database Setup**: Automated PostgreSQL and Redis services
+- ✅ **Smart Database Setup**: Automatically detects and uses GitHub Actions PostgreSQL service or local PostgreSQL installation
+- ✅ **Smart Redis Setup**: Automatically detects and uses GitHub Actions Redis service or local Redis installation
 - ✅ **Public Access**: Exposes the app via Cloudflare Quick Tunnel (no authentication required)
 - ✅ **30-Minute Timeout**: Automatically shuts down after 30 minutes
 - ✅ **Health Monitoring**: Continuous health checks during runtime
 - ✅ **Comprehensive Logging**: Detailed step-by-step execution logs
+- ✅ **Automatic Cleanup**: Cleans up all resources after completion
 
 ## How to Use
 
@@ -128,15 +130,35 @@ The workflow automatically configures these environment variables:
 ## Services
 
 ### PostgreSQL
+The workflow intelligently detects and uses PostgreSQL:
+
+**GitHub Actions Service (Preferred)**:
 - **Version**: 15-alpine
 - **Port**: 5432
 - **Database**: coolify
 - **Username**: coolify
 - **Password**: password
+- Automatically configured when running in GitHub Actions
+
+**Local PostgreSQL (Fallback)**:
+- Used when GitHub Actions service is not available
+- Automatically detects existing PostgreSQL installation
+- Creates database and user if needed
+- Starts PostgreSQL service if stopped
+- Cleans up database after workflow completion
 
 ### Redis
+The workflow also intelligently detects and uses Redis:
+
+**GitHub Actions Service (Preferred)**:
 - **Version**: 7-alpine
 - **Port**: 6379
+- Automatically configured when running in GitHub Actions
+
+**Local Redis (Fallback)**:
+- Used when GitHub Actions service is not available
+- Automatically detects and starts local Redis if available
+- Not critical for basic application functionality
 
 ## Stopping the Workflow Early
 
@@ -175,6 +197,33 @@ The application might be starting but not responding correctly:
 - Check Laravel logs in the cleanup step
 - Verify all required services are running
 - Check for application errors in the logs
+
+### Database Connection Issues
+
+If the workflow fails to connect to PostgreSQL:
+
+**For GitHub Actions Service**:
+- Verify the service is defined in the workflow
+- Check service health in the workflow logs
+- Ensure port 5432 is properly mapped
+
+**For Local PostgreSQL**:
+- Verify PostgreSQL is installed: `psql --version`
+- Check PostgreSQL service status: `sudo systemctl status postgresql`
+- Review the "Check and setup PostgreSQL" step logs
+- Ensure user has permissions to create databases
+
+**Common Solutions**:
+- Wait longer for PostgreSQL to start (check health check timeouts)
+- Verify pg_isready is available
+- Check PostgreSQL authentication configuration
+
+### Redis Connection Issues
+
+Redis issues are generally non-critical:
+- The application can often run without Redis
+- Check the "Check and setup Redis" step logs
+- Verify Redis installation if using local Redis
 
 ## Security Considerations
 
