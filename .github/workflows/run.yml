@@ -77,8 +77,16 @@ jobs:
         run: |
           docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d coolify soketi
           echo "Installing PHP dependencies inside container..."
-          # Run composer as root to avoid permission issues, then fix ownership and permissions
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T -u root coolify sh -c "set -e && git config --global --add safe.directory /var/www/html && composer install --no-interaction --prefer-dist --optimize-autoloader && chown -R 9999:9999 /var/www/html && chmod -R 775 /var/www/html/storage && chmod -R 775 /var/www/html/bootstrap/cache"
+          # Run composer as root to avoid permission issues, then fix ownership
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T -u root coolify bash -c "
+            set -e
+            git config --global --add safe.directory /var/www/html
+            composer install --no-interaction --prefer-dist --optimize-autoloader
+            chown -R www-data:www-data /var/www/html/vendor /var/www/html/bootstrap/cache
+            chown -R www-data:www-data /var/www/html/storage
+            chmod -R 775 /var/www/html/storage
+            chmod -R 775 /var/www/html/bootstrap/cache
+          "
           echo "✅ Composer dependencies installed"
           # Restart the container to ensure all services start with correct permissions
           docker compose -f docker-compose.yml -f docker-compose.dev.yml restart coolify
@@ -98,12 +106,6 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
           echo "Checking Coolify logs..."
           docker compose -f docker-compose.yml -f docker-compose.dev.yml logs coolify | tail -30
-
-      - name: Fix storage permissions
-        run: |
-          echo "Ensuring storage directory permissions..."
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T -u root coolify sh -c "chown -R 9999:9999 /var/www/html/storage && chmod -R 775 /var/www/html/storage"
-          echo "✅ Storage permissions fixed"
 
       - name: Run migrations and seed database
         run: |
