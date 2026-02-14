@@ -1,4 +1,4 @@
-name: Deploy with Quick Tunnel (30 Min Session)
+name: Deploy with Quick Tunnel
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
       app_port:
         description: "Laravel app port"
         required: false
-        default: "8000"
+        default: "3000"
         type: string
       health_path:
         description: "Health check path"
@@ -21,8 +21,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # Increased timeout to allow for setup + 30 mins of runtime
-    timeout-minutes: 45 
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
@@ -43,88 +42,178 @@ jobs:
           node-version: "20"
           cache: "npm"
 
-      - name: Start Postgres + Redis
+      - name: Start Postgres + Redis (local via docker compose)
         run: |
+          set -euo pipefail
+
           cat > docker-compose.quicktunnel.yml <<'EOF'
           services:
             postgres:
               image: postgres:16-alpine
               ports: ["5432:5432"]
-              environment: { POSTGRES_USER: app, POSTGRES_PASSWORD: app, POSTGRES_DB: app }
+              environment:
+                POSTGRES_USER: app
+                POSTGRES_PASSWORD: app
+                POSTGRES_DB: app
+              healthcheck:
+                test: ["CMD-SHELL", "pg_isready -U app -d app"]
+                interval: 5s
+                timeout: 3s
+                retries: 20
             redis:
               image: redis:7-alpine
               ports: ["6379:6379"]
+              healthcheck:
+                test: ["CMD", "redis-cli", "ping"]
+                interval: 5s
+                timeout: 3s
+                retries: 20
           EOF
+
           docker compose -f docker-compose.quicktunnel.yml up -d
-          
+
+          echo "Waiting for DB/Redis..."
+          for i in {1..40}; do
+            pg=$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose -f docker-compose.quicktunnel.yml ps -q postgres)" 2>/dev/null || echo starting)
+            rd=$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose -f docker-compose.quicktunnel.yml ps -q redis)" 2>/dev/null || echo starting)
+            echo "postgres=$pg redis=$rd"
+            [ "$pg" = "healthy" ] && [ "$rd" = "healthy" ] && break
+            sleep 3
+          done
+
+          [ "$pg" = "healthy" ] && [ "$rd" = "healthy" ] || (docker compose -f docker-compose.quicktunnel.yml logs && exit 1)
+
+          echo "DATABASE_URL=postgresql://app:app@127.0.0.1:5432/app" >> $GITHUB_ENV
+          echo "REDIS_URL=redis://127.0.0.1:6379/0" >> $GITHUB_ENV
+
           echo "DB_CONNECTION=pgsql" >> $GITHUB_ENV
           echo "DB_HOST=127.0.0.1" >> $GITHUB_ENV
           echo "DB_PORT=5432" >> $GITHUB_ENV
           echo "DB_DATABASE=app" >> $GITHUB_ENV
           echo "DB_USERNAME=app" >> $GITHUB_ENV
           echo "DB_PASSWORD=app" >> $GITHUB_ENV
+          echo "REDIS_HOST=127.0.0.1" >> $GITHUB_ENV
+          echo "REDIS_PORT=6379" >> $GITHUB_ENV
+          echo "CACHE_DRIVER=redis" >> $GITHUB_ENV
+          echo "QUEUE_CONNECTION=redis" >> $GITHUB_ENV
+          echo "SESSION_DRIVER=redis" >> $GITHUB_ENV
 
-      - name: Install Deps & Build
+      - name: Install Composer deps
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Install Node deps + build assets (no Vite dev server in CI)
         run: |
-          composer install --no-interaction --prefer-dist
           npm ci
           npm run build
 
       - name: Prepare Laravel env
         run: |
-          cp .env.example .env || touch .env
-          php artisan key:generate --force
+          set -e
+
+          if [ ! -f .env ]; then
+            if [ -f .env.example ]; then
+              cp .env.example .env
+            else
+              cat > .env <<'EOF'
+          APP_NAME=App
+          APP_ENV=local
+          APP_KEY=
+          APP_DEBUG=true
+          APP_URL=http://localhost
+          LOG_CHANNEL=stack
+          EOF
+            fi
+          fi
+
+          php artisan key:generate --force || true
+
           {
-            echo "DB_CONNECTION=pgsql"
-            echo "DB_HOST=127.0.0.1"
-            echo "DB_DATABASE=app"
-            echo "DB_USERNAME=app"
-            echo "DB_PASSWORD=app"
+            echo "DB_CONNECTION=${DB_CONNECTION:-pgsql}"
+            echo "DB_HOST=${DB_HOST:-127.0.0.1}"
+            echo "DB_PORT=${DB_PORT:-5432}"
+            echo "DB_DATABASE=${DB_DATABASE:-app}"
+            echo "DB_USERNAME=${DB_USERNAME:-app}"
+            echo "DB_PASSWORD=${DB_PASSWORD:-app}"
+            echo "REDIS_HOST=${REDIS_HOST:-127.0.0.1}"
+            echo "REDIS_PORT=${REDIS_PORT:-6379}"
+            echo "CACHE_DRIVER=${CACHE_DRIVER:-redis}"
+            echo "QUEUE_CONNECTION=${QUEUE_CONNECTION:-redis}"
+            echo "SESSION_DRIVER=${SESSION_DRIVER:-redis}"
           } >> .env
+
+          php artisan config:clear || true
+          php artisan cache:clear || true
 
       - name: Migrate
         run: php artisan migrate --force
 
       - name: Start Laravel app
         run: |
+          set -e
           nohup php artisan serve --host=0.0.0.0 --port=${{ inputs.app_port }} > app.log 2>&1 &
           echo $! > app.pid
-          sleep 3
+          sleep 1
+          tail -n 30 app.log || true
+
+      - name: Wait for local health
+        run: |
+          set -e
+          url="http://127.0.0.1:${{ inputs.app_port }}${{ inputs.health_path }}"
+          echo "Checking $url"
+          for i in {1..60}; do
+            if curl -fsS "$url" >/dev/null; then
+              echo "Healthy ✅"
+              exit 0
+            fi
+            if [ $((i % 10)) -eq 0 ]; then
+              echo "Still waiting... (attempt $i/60)"
+              tail -n 50 app.log || true
+            fi
+            sleep 2
+          done
+          echo "App not healthy ❌"
+          cat app.log || true
+          exit 1
 
       - name: Install cloudflared
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
+          cloudflared --version
 
-      - name: Start Quick Tunnel
-        id: tunnel
+      - name: Start Quick Tunnel + verify
         run: |
+          set -e
           nohup cloudflared tunnel --url "http://127.0.0.1:${{ inputs.app_port }}" > tunnel.log 2>&1 &
           echo $! > tunnel.pid
-          
-          # Extract URL
+
           for i in {1..30}; do
-            URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' tunnel.log | head -n 1 || true)
-            if [ -n "$URL" ]; then
-              echo "tunnel_url=$URL" >> $GITHUB_OUTPUT
-              echo "### 🚀 App is Live!" >> $GITHUB_STEP_SUMMARY
-              echo "URL: [$URL]($URL)" >> $GITHUB_STEP_SUMMARY
-              echo "The session will stay active for 30 minutes." >> $GITHUB_STEP_SUMMARY
-              break
-            fi
+            TUNNEL_URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' tunnel.log | head -n 1 || true)
+            [ -n "$TUNNEL_URL" ] && break
             sleep 2
           done
 
-      - name: Keep Alive (30 Minutes)
-        run: |
-          echo "App is running at ${{ steps.tunnel.outputs.tunnel_url }}"
-          echo "Waiting 30 minutes before shutting down..."
-          sleep 1800
+          [ -n "${TUNNEL_URL:-}" ] || (echo "No tunnel URL"; cat tunnel.log; exit 1)
+
+          echo "Public URL: $TUNNEL_URL"
+          echo "Health:     $TUNNEL_URL${{ inputs.health_path }}"
+
+          for i in {1..10}; do
+            if curl -fsS "$TUNNEL_URL${{ inputs.health_path }}" >/dev/null; then
+              echo "Public check OK ✅"
+              exit 0
+            fi
+            sleep 3
+          done
+
+          echo "Public check failed ❌"
+          tail -n 120 app.log || true
+          tail -n 120 tunnel.log || true
+          exit 1
 
       - name: Cleanup
         if: always()
         run: |
           kill "$(cat tunnel.pid 2>/dev/null)" 2>/dev/null || true
           kill "$(cat app.pid 2>/dev/null)" 2>/dev/null || true
-          docker compose -f docker-compose.quicktunnel.yml down -v 2>/dev/null || true
- 
+          docker compose -f docker-compose.quicktunnel.yml down -v 2>/dev/null || true 
