@@ -99,6 +99,12 @@ jobs:
           echo "Checking Coolify logs..."
           docker compose -f docker-compose.yml -f docker-compose.dev.yml logs coolify | tail -30
 
+      - name: Fix storage permissions
+        run: |
+          echo "Ensuring storage directory permissions..."
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T -u root coolify sh -c "chown -R 9999:9999 /var/www/html/storage && chmod -R 775 /var/www/html/storage"
+          echo "✅ Storage permissions fixed"
+
       - name: Run migrations and seed database
         run: |
           echo "Running migrations and seeders..."
@@ -207,4 +213,4 @@ jobs:
         if: always()
         run: |
           echo "Coolify application logs:"
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml logs coolify | tail -100 
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml logs coolify | tail -100
