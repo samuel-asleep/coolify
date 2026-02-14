@@ -5734,6 +5734,7 @@ All notable changes to this project will be documented in this file.
 - *(api)* Improve app endpoint deprecation description
 - Update changelog
 - Update changelog
+- Update changelog
 
 ### ⚡ Performance
 
