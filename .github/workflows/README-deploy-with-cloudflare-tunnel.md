@@ -68,6 +68,7 @@ Each workflow run validates the following steps:
 - ✅ PostgreSQL service starts and is healthy
 - ✅ Redis service starts and is healthy
 - ✅ Database migrations run successfully
+- ✅ Database seeded with initial data (ProductionSeeder)
 - ✅ Application connects to database
 
 ### 5. Application Runtime

@@ -205,6 +205,9 @@ jobs:
           echo "RAY_ENABLED=false" >> .env
           echo "TELESCOPE_ENABLED=false" >> .env
 
+          # Ensure seeder is enabled (defaults to true but explicitly set it)
+          echo "SEEDER_ENABLED=true" >> .env
+
           echo "Environment configuration:"
           cat .env
       - name: Get Composer cache directory
@@ -247,6 +250,12 @@ jobs:
         run: |
           php artisan migrate --force --no-interaction
           echo "✓ Database migrations completed"
+
+      - name: Seed database with initial data
+        run: |
+          # Run Coolify's seeder command which sets up initial instance settings
+          php artisan start:seeder --no-interaction
+          echo "✓ Database seeded with initial data"
 
       - name: Optimize application
         run: |
