@@ -1,0 +1,149 @@
+name: Run Coolify with Cloudflare Quick Tunnel
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - copilot/create-github-actions-workflow-again
+
+permissions:
+  contents: read
+
+jobs:
+  run-and-expose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up environment file
+        run: |
+          cp .env.development.example .env
+          # Generate APP_KEY
+          echo "APP_KEY=base64:$(openssl rand -base64 32)" >> .env
+          # Update DB_HOST for docker network
+          sed -i 's/DB_HOST=host.docker.internal/DB_HOST=postgres/g' .env
+          cat .env
+
+      - name: Build Docker images
+        run: |
+          docker compose -f docker-compose.dev.yml build --no-cache coolify soketi
+
+      - name: Start services
+        run: |
+          docker compose -f docker-compose.dev.yml up -d postgres redis minio
+          echo "Waiting for services to be healthy..."
+          sleep 15
+
+      - name: Start Coolify application
+        run: |
+          docker compose -f docker-compose.dev.yml up -d coolify soketi
+          echo "Waiting for Coolify to start..."
+          sleep 20
+
+      - name: Check service status
+        run: |
+          docker compose -f docker-compose.dev.yml ps
+          echo "Checking Coolify health..."
+          docker compose -f docker-compose.dev.yml logs coolify | tail -50
+
+      - name: Run migrations and seed database
+        run: |
+          echo "Running migrations and seeders..."
+          docker compose -f docker-compose.dev.yml exec -T coolify php artisan migrate --force --seed
+          echo "Database setup complete"
+
+      - name: Install Cloudflare Tunnel (cloudflared)
+        run: |
+          # Download and install cloudflared
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          cloudflared --version
+
+      - name: Start Cloudflare Quick Tunnel
+        run: |
+          # Start cloudflared tunnel in background and capture the URL
+          echo "Starting Cloudflare Quick Tunnel..."
+          nohup cloudflared tunnel --url http://localhost:8000 > tunnel.log 2>&1 &
+          TUNNEL_PID=$!
+          echo "TUNNEL_PID=${TUNNEL_PID}" >> $GITHUB_ENV
+          
+          # Wait for tunnel to establish and get URL
+          echo "Waiting for tunnel to establish..."
+          sleep 10
+          
+          # Extract tunnel URL from logs
+          TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' tunnel.log | head -1 || echo "")
+          
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "Failed to get tunnel URL, checking logs..."
+            cat tunnel.log
+            exit 1
+          fi
+          
+          echo "TUNNEL_URL=${TUNNEL_URL}" >> $GITHUB_ENV
+          echo "✅ Coolify is now accessible at: ${TUNNEL_URL}"
+          echo "::notice title=Cloudflare Tunnel URL::${TUNNEL_URL}"
+
+      - name: Display access information
+        run: |
+          echo "================================================"
+          echo "🚀 Coolify is running and accessible via Cloudflare Quick Tunnel!"
+          echo "================================================"
+          echo ""
+          echo "🌐 Public URL: ${{ env.TUNNEL_URL }}"
+          echo "🔐 Default Login: test@example.com"
+          echo "🔑 Default Password: password"
+          echo ""
+          echo "================================================"
+          echo ""
+          echo "The application will remain accessible for the duration of this workflow."
+          echo "To keep it running longer, increase the timeout-minutes value."
+
+      - name: Keep tunnel alive
+        run: |
+          echo "Keeping tunnel alive for 30 minutes..."
+          echo "You can access Coolify at: ${{ env.TUNNEL_URL }}"
+          
+          # Keep the tunnel alive and periodically check status
+          for i in {1..30}; do
+            echo "[$i/30] Tunnel still active at: ${{ env.TUNNEL_URL }}"
+            sleep 60
+            
+            # Check if tunnel process is still running
+            if ! kill -0 ${{ env.TUNNEL_PID }} 2>/dev/null; then
+              echo "Tunnel process died, restarting..."
+              nohup cloudflared tunnel --url http://localhost:8000 > tunnel.log 2>&1 &
+              TUNNEL_PID=$!
+              echo "TUNNEL_PID=${TUNNEL_PID}" >> $GITHUB_ENV
+              sleep 5
+            fi
+          done
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Shutting down..."
+          if [ ! -z "${{ env.TUNNEL_PID }}" ]; then
+            kill ${{ env.TUNNEL_PID }} 2>/dev/null || true
+          fi
+          docker compose -f docker-compose.dev.yml down -v
+          echo "Cleanup complete"
+
+      - name: Show tunnel logs
+        if: always()
+        run: |
+          if [ -f tunnel.log ]; then
+            echo "Cloudflare Tunnel logs:"
+            cat tunnel.log
+          fi
+
+      - name: Show application logs
+        if: always()
+        run: |
+          echo "Coolify application logs:"
+          docker compose -f docker-compose.dev.yml logs coolify | tail -100
