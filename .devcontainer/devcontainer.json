@@ -20,6 +20,55 @@
     "DOCKER_API_VERSION": "1.43"
   },
 
+  "forwardPorts": [
+    8000,
+    5173,
+    6001,
+    6002,
+    5432,
+    6379,
+    9000,
+    9001,
+    1025,
+    8025
+  ],
+
+  "portsAttributes": {
+    "8000": {
+      "label": "Coolify App",
+      "onAutoForward": "openBrowser"
+    },
+    "5173": {
+      "label": "Vite Dev Server",
+      "onAutoForward": "openBrowser"
+    },
+    "6001": {
+      "label": "Realtime (Soketi)"
+    },
+    "6002": {
+      "label": "Realtime Secondary"
+    },
+    "5432": {
+      "label": "Postgres"
+    },
+    "6379": {
+      "label": "Redis"
+    },
+    "9000": {
+      "label": "MinIO API"
+    },
+    "9001": {
+      "label": "MinIO Console"
+    },
+    "1025": {
+      "label": "Mailpit SMTP"
+    },
+    "8025": {
+      "label": "Mailpit UI",
+      "onAutoForward": "openBrowser"
+    }
+  },
+
   "postStartCommand": "if [ -S /var/run/docker.sock ]; then SOCK_GID=$(stat -c '%g' /var/run/docker.sock); if getent group docker > /dev/null; then sudo groupmod -g $SOCK_GID docker; else sudo groupadd -g $SOCK_GID docker; fi; sudo usermod -aG docker vscode; fi",
 
   "customizations": {
