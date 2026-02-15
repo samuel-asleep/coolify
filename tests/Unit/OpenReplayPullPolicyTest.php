@@ -8,7 +8,7 @@
  * from AWS ECR Public and other registries would trigger rate limit errors.
  */
 it('ensures openreplay service has pull_policy configured for all services', function () {
-    $yamlContent = file_get_contents(base_path('templates/compose/openreplay.yaml'));
+    $yamlContent = file_get_contents(__DIR__.'/../../templates/compose/openreplay.yaml');
     
     expect($yamlContent)
         ->toContain('pull_policy: missing');
@@ -23,15 +23,14 @@ it('ensures openreplay service has pull_policy configured for all services', fun
     
     // Verify each service has pull_policy set to 'missing'
     foreach ($services as $serviceName => $serviceConfig) {
-        expect($serviceConfig)
-            ->toHaveKey('pull_policy', "Service '{$serviceName}' should have pull_policy configured")
-            ->and(data_get($serviceConfig, 'pull_policy'))
+        expect($serviceConfig)->toHaveKey('pull_policy');
+        expect(data_get($serviceConfig, 'pull_policy'))
             ->toBe('missing', "Service '{$serviceName}' pull_policy should be 'missing'");
     }
 });
 
 it('ensures openreplay service template JSON contains updated compose with pull_policy', function () {
-    $serviceTemplatesPath = base_path('templates/service-templates.json');
+    $serviceTemplatesPath = __DIR__.'/../../templates/service-templates.json';
     $serviceTemplates = json_decode(file_get_contents($serviceTemplatesPath), true);
     
     expect($serviceTemplates)
@@ -62,7 +61,7 @@ it('ensures openreplay service template JSON contains updated compose with pull_
 });
 
 it('ensures openreplay has expected number of services with pull_policy', function () {
-    $yamlContent = file_get_contents(base_path('templates/compose/openreplay.yaml'));
+    $yamlContent = file_get_contents(__DIR__.'/../../templates/compose/openreplay.yaml');
     $yaml = \Symfony\Component\Yaml\Yaml::parse($yamlContent);
     $services = data_get($yaml, 'services', []);
     
