@@ -59,7 +59,7 @@ jobs:
           fi
 
       - name: Install cloudflared
-        uses: AnimMouse/setup-cloudflared@v3
+        uses: AnimMouse/setup-cloudflared@v2
 
       - name: Expose localhost:8000 via Cloudflare Quick Tunnel
         shell: bash
