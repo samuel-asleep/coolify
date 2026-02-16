@@ -1,10 +1,10 @@
-name: Dev Build + Docker Compose + Cloudflare Quick Tunnel
+name: Dev Preview (Docker + QuickTunnel)
 
 on:
   workflow_dispatch:
     inputs:
       branch:
-        description: "Branch to run on (leave blank for default)"
+        description: "Branch to run (leave blank for default)"
         required: false
         default: ""
         type: string
@@ -26,75 +26,75 @@ jobs:
           set -euo pipefail
           cp .env.development.example .env
 
-      # Avoid EACCES by ensuring host-side node_modules isn't created/owned by root from Docker.
-      # We run npm build BEFORE docker compose, and also hard-clean any existing node_modules.
-      - name: Clean host node_modules (prevent permission issues)
+      - name: Clean node_modules (prevent EACCES)
         shell: bash
         run: |
           set -euo pipefail
           sudo rm -rf node_modules
 
-      - name: Setup Node.js (includes npm)
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "npm"
 
-      - name: Install deps + build
+      - name: Install dependencies & build
         shell: bash
         run: |
           set -euo pipefail
           npm ci
           npm run build
 
-      - name: Start app (docker compose)
+      - name: Start Docker Compose
         shell: bash
         run: |
           set -euo pipefail
           docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d
           docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
 
-      - name: Stop any container exposing port 5173
+      - name: Stop containers exposing port 5173
         shell: bash
         run: |
           set -euo pipefail
           IDS="$(docker ps --format '{{.ID}} {{.Ports}}' | grep -E '(:|->)5173' | awk '{print $1}' || true)"
-          if [ -n "${IDS}" ]; then
-            echo "Stopping containers: ${IDS}"
-            docker stop ${IDS}
+          if [ -n "$IDS" ]; then
+            echo "Stopping containers: $IDS"
+            docker stop $IDS
           else
-            echo "No running container found exposing port 5173"
+            echo "No container exposing 5173 found."
           fi
 
-      - name: Install cloudflared (official repo)
+      - name: Install cloudflared (direct .deb method)
         shell: bash
         run: |
-    set -euo pipefail
-    curl -fsSL -o /tmp/cloudflared.deb \
-      https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-    sudo dpkg -i /tmp/cloudflared.deb
-    cloudflared --version
+          set -euo pipefail
+          curl -fsSL -o /tmp/cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i /tmp/cloudflared.deb
+          cloudflared --version
 
-      - name: Wait for localhost:8000 to be ready
+      - name: Wait for localhost:8000
         shell: bash
         run: |
           set -euo pipefail
           for i in {1..60}; do
             if curl -fsS http://localhost:8000/ >/dev/null 2>&1; then
-              echo "Port 8000 is reachable."
+              echo "Port 8000 is ready."
               exit 0
             fi
-            echo "Waiting for http://localhost:8000 ... ($i/60)"
+            echo "Waiting for port 8000... ($i/60)"
             sleep 2
           done
-          echo "Timed out waiting for port 8000"
+
+          echo "Timeout waiting for port 8000"
           docker ps
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml logs --no-color --tail=200 || true
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml logs --tail=200 || true
           exit 1
 
-      - name: Expose localhost:8000 via Cloudflare Quick Tunnel
+      - name: Expose via Cloudflare Quick Tunnel
         shell: bash
         run: |
           set -euo pipefail
-          echo "Starting Quick Tunnel for http://localhost:8000 (URL will appear in logs)..."
+          echo "Starting Cloudflare Quick Tunnel..."
+          echo "Public URL will appear below:"
           cloudflared tunnel --url http://localhost:8000 --no-autoupdate
