@@ -1,41 +1,53 @@
 # documentation: https://docs.openreplay.com/
 # slogan: OpenReplay is an open-source session replay suite that lets you see what users do on your web app, helping you troubleshoot issues faster.
-# tags: analytics, session-replay, monitoring, debugging, user-experience
+# tags: analytics,session-replay,monitoring,debugging,user-experience
 # category: analytics
 # logo: svgs/openreplay.png
-# port: 80
+# port: 8080
+
 services:
   postgresql:
     image: postgres:16
-    pull_policy: missing
     environment:
       - POSTGRES_PASSWORD=${SERVICE_PASSWORD_POSTGRES}
       - POSTGRES_USER=postgres
       - POSTGRES_DB=postgres
     volumes:
       - openreplay-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.3-alpine
-    pull_policy: missing
     volumes:
       - openreplay-clickhouse:/var/lib/clickhouse
     environment:
       - CLICKHOUSE_USER=default
       - CLICKHOUSE_PASSWORD=
       - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: ghcr.io/openreplay/valkey:8
-    pull_policy: missing
     volumes:
       - openreplay-redisdata:/bitnami/redis/data
     environment:
       - ALLOW_EMPTY_PASSWORD=yes
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   minio:
     image: minio/minio:RELEASE.2024-11-07T00-52-20Z
-    pull_policy: missing
     volumes:
       - openreplay-miniodata:/data
     environment:
@@ -43,9 +55,9 @@ services:
       - MINIO_ROOT_PASSWORD=${SERVICE_PASSWORD_MINIO}
     command: server /data
 
-  alerts:
-    image: public.ecr.aws/p1t3u8a3/alerts:v1.25.0
-    pull_policy: missing
+  # Wave 2: Database migrations (must run before app services)
+  db:
+    image: public.ecr.aws/p1t3u8a3/db:v1.25.0
     volumes:
       - openreplay-shared:/mnt/efs
     environment:
@@ -64,14 +76,33 @@ services:
       - postgresql
       - redis
       - minio
-    restart: unless-stopped
+
+  # Wave 3: Core services
+  alerts:
+    image: public.ecr.aws/p1t3u8a3/alerts:v1.25.0
+    volumes:
+      - openreplay-shared:/mnt/efs
+    environment:
+      - POSTGRES_HOST=postgresql
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${SERVICE_PASSWORD_POSTGRES}
+      - POSTGRES_DB=postgres
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MINIO_HOST=minio
+      - MINIO_PORT=9000
+      - MINIO_ACCESS_KEY=${SERVICE_USER_MINIO}
+      - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
+    depends_on:
+      - db
 
   api:
     image: public.ecr.aws/p1t3u8a3/api:v1.25.0
-    pull_policy: missing
     volumes:
       - openreplay-shared:/mnt/efs
     environment:
+      - SERVICE_URL_API_8080=/api
       - POSTGRES_HOST=postgresql
       - POSTGRES_PORT=5432
       - POSTGRES_USER=postgres
@@ -84,17 +115,14 @@ services:
       - MINIO_ACCESS_KEY=${SERVICE_USER_MINIO}
       - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
     depends_on:
-      - postgresql
-      - redis
-      - minio
-    restart: unless-stopped
+      - db
 
   http:
     image: public.ecr.aws/p1t3u8a3/http:v1.25.0
-    pull_policy: missing
     volumes:
       - openreplay-shared:/mnt/efs
     environment:
+      - SERVICE_URL_HTTP_8888=/ingest
       - POSTGRES_HOST=postgresql
       - POSTGRES_PORT=5432
       - POSTGRES_USER=postgres
@@ -107,14 +135,10 @@ services:
       - MINIO_ACCESS_KEY=${SERVICE_USER_MINIO}
       - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
     depends_on:
-      - postgresql
-      - redis
-      - minio
-    restart: unless-stopped
+      - db
 
   images:
     image: public.ecr.aws/p1t3u8a3/images:v1.25.0
-    pull_policy: missing
     volumes:
       - openreplay-shared:/mnt/efs
     environment:
@@ -129,15 +153,12 @@ services:
       - MINIO_PORT=9000
       - MINIO_ACCESS_KEY=${SERVICE_USER_MINIO}
       - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
+    # Wave 4: Secondary services
     depends_on:
-      - postgresql
-      - redis
-      - minio
-    restart: unless-stopped
+      - api
 
   integrations:
     image: public.ecr.aws/p1t3u8a3/integrations:v1.25.0
-    pull_policy: missing
     volumes:
       - openreplay-shared:/mnt/efs
     environment:
@@ -153,14 +174,10 @@ services:
       - MINIO_ACCESS_KEY=${SERVICE_USER_MINIO}
       - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
     depends_on:
-      - postgresql
-      - redis
-      - minio
-    restart: unless-stopped
+      - api
 
   sink:
     image: public.ecr.aws/p1t3u8a3/sink:v1.25.0
-    pull_policy: missing
     volumes:
       - openreplay-shared:/mnt/efs
     environment:
@@ -178,15 +195,11 @@ services:
       - CLICKHOUSE_HOST=clickhouse
       - CLICKHOUSE_PORT=9000
     depends_on:
-      - postgresql
-      - redis
-      - minio
+      - db
       - clickhouse
-    restart: unless-stopped
 
   sourcemapreader:
     image: public.ecr.aws/p1t3u8a3/sourcemapreader:v1.25.0
-    pull_policy: missing
     volumes:
       - openreplay-shared:/mnt/efs
     environment:
@@ -201,15 +214,12 @@ services:
       - MINIO_PORT=9000
       - MINIO_ACCESS_KEY=${SERVICE_USER_MINIO}
       - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
+    # Wave 5: Remaining services
     depends_on:
-      - postgresql
-      - redis
-      - minio
-    restart: unless-stopped
+      - frontend
 
   spot:
     image: public.ecr.aws/p1t3u8a3/spot:v1.25.0
-    pull_policy: missing
     volumes:
       - openreplay-shared:/mnt/efs
     environment:
@@ -225,14 +235,10 @@ services:
       - MINIO_ACCESS_KEY=${SERVICE_USER_MINIO}
       - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
     depends_on:
-      - postgresql
-      - redis
-      - minio
-    restart: unless-stopped
+      - frontend
 
   storage:
     image: public.ecr.aws/p1t3u8a3/storage:v1.25.0
-    pull_policy: missing
     volumes:
       - openreplay-shared:/mnt/efs
     environment:
@@ -248,17 +254,14 @@ services:
       - MINIO_ACCESS_KEY=${SERVICE_USER_MINIO}
       - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
     depends_on:
-      - postgresql
-      - redis
-      - minio
-    restart: unless-stopped
+      - frontend
 
   assets:
     image: public.ecr.aws/p1t3u8a3/assets:v1.25.0
-    pull_policy: missing
     volumes:
       - openreplay-shared:/mnt/efs
     environment:
+      - SERVICE_URL_ASSETS_8080=/assets
       - POSTGRES_HOST=postgresql
       - POSTGRES_PORT=5432
       - POSTGRES_USER=postgres
@@ -270,18 +273,16 @@ services:
       - MINIO_PORT=9000
       - MINIO_ACCESS_KEY=${SERVICE_USER_MINIO}
       - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
+    # Wave 4: Secondary services
     depends_on:
-      - postgresql
-      - redis
-      - minio
-    restart: unless-stopped
+      - api
 
   assist:
     image: public.ecr.aws/p1t3u8a3/assist:v1.25.0
-    pull_policy: missing
     volumes:
       - openreplay-shared:/mnt/efs
     environment:
+      - SERVICE_URL_ASSIST_9001=/ws-assist
       - POSTGRES_HOST=postgresql
       - POSTGRES_PORT=5432
       - POSTGRES_USER=postgres
@@ -294,14 +295,10 @@ services:
       - MINIO_ACCESS_KEY=${SERVICE_USER_MINIO}
       - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
     depends_on:
-      - postgresql
-      - redis
-      - minio
-    restart: unless-stopped
+      - api
 
   canvases:
     image: public.ecr.aws/p1t3u8a3/canvases:v1.25.0
-    pull_policy: missing
     volumes:
       - openreplay-shared:/mnt/efs
     environment:
@@ -317,14 +314,10 @@ services:
       - MINIO_ACCESS_KEY=${SERVICE_USER_MINIO}
       - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
     depends_on:
-      - postgresql
-      - redis
-      - minio
-    restart: unless-stopped
+      - frontend
 
   chalice:
     image: public.ecr.aws/p1t3u8a3/chalice:v1.25.0
-    pull_policy: missing
     volumes:
       - openreplay-shared:/mnt/efs
     environment:
@@ -340,37 +333,11 @@ services:
       - MINIO_ACCESS_KEY=${SERVICE_USER_MINIO}
       - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
     depends_on:
-      - postgresql
-      - redis
-      - minio
-    restart: unless-stopped
+      - frontend
 
-  db:
-    image: public.ecr.aws/p1t3u8a3/db:v1.25.0
-    pull_policy: missing
-    volumes:
-      - openreplay-shared:/mnt/efs
-    environment:
-      - POSTGRES_HOST=postgresql
-      - POSTGRES_PORT=5432
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=${SERVICE_PASSWORD_POSTGRES}
-      - POSTGRES_DB=postgres
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - MINIO_HOST=minio
-      - MINIO_PORT=9000
-      - MINIO_ACCESS_KEY=${SERVICE_USER_MINIO}
-      - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
-    depends_on:
-      - postgresql
-      - redis
-      - minio
-    restart: unless-stopped
-
+  # Wave 3: Core services
   ender:
     image: public.ecr.aws/p1t3u8a3/ender:v1.25.0
-    pull_policy: missing
     volumes:
       - openreplay-shared:/mnt/efs
     environment:
@@ -388,19 +355,16 @@ services:
       - CLICKHOUSE_HOST=clickhouse
       - CLICKHOUSE_PORT=9000
     depends_on:
-      - postgresql
-      - redis
-      - minio
+      - db
       - clickhouse
-    restart: unless-stopped
 
+  # Wave 4: Secondary services
   frontend:
     image: public.ecr.aws/p1t3u8a3/frontend:v1.25.0
-    pull_policy: missing
     volumes:
       - openreplay-shared:/mnt/efs
     environment:
-      - SERVICE_URL_FRONTEND
+      - SERVICE_URL_FRONTEND_8080
       - POSTGRES_HOST=postgresql
       - POSTGRES_PORT=5432
       - POSTGRES_USER=postgres
@@ -413,15 +377,16 @@ services:
       - MINIO_ACCESS_KEY=${SERVICE_USER_MINIO}
       - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
     depends_on:
-      - postgresql
-      - redis
-      - minio
       - api
-    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
+  # Wave 5: Remaining services
   heuristics:
     image: public.ecr.aws/p1t3u8a3/heuristics:v1.25.0
-    pull_policy: missing
     volumes:
       - openreplay-shared:/mnt/efs
     environment:
@@ -437,84 +402,7 @@ services:
       - MINIO_ACCESS_KEY=${SERVICE_USER_MINIO}
       - MINIO_SECRET_KEY=${SERVICE_PASSWORD_MINIO}
     depends_on:
-      - postgresql
-      - redis
-      - minio
-    restart: unless-stopped
-
-  nginx:
-    image: nginx:1.27-alpine
-    pull_policy: missing
-    # Embed nginx config at container start so external file is not required
-    command: >
-      /bin/sh -lc "cat > /etc/nginx/conf.d/default.conf <<'NGINX_CONF'
-      upstream frontend {
-        server frontend:8080;
-      }
-      upstream api {
-        server api:8080;
-      }
-      upstream assets {
-        server assets:8080;
-      }
-      upstream http {
-        server http:8888;
-      }
-      upstream assist {
-        server assist:9001;
-      }
-      server {
-        listen 80;
-        server_name _;
-        client_max_body_size 500M;
-        location / {
-          proxy_pass http://frontend;
-          proxy_set_header Host $host;
-          proxy_set_header X-Real-IP $remote_addr;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $scheme;
-        }
-        location /api/ {
-          proxy_pass http://api/;
-          proxy_set_header Host $host;
-          proxy_set_header X-Real-IP $remote_addr;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $scheme;
-        }
-        location /assets/ {
-          proxy_pass http://assets/;
-          proxy_set_header Host $host;
-          proxy_set_header X-Real-IP $remote_addr;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $scheme;
-        }
-        location /ingest/ {
-          proxy_pass http://http/;
-          proxy_set_header Host $host;
-          proxy_set_header X-Real-IP $remote_addr;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $scheme;
-        }
-        location /ws-assist/ {
-          proxy_pass http://assist/;
-          proxy_http_version 1.1;
-          proxy_set_header Upgrade $http_upgrade;
-          proxy_set_header Connection "upgrade";
-          proxy_set_header Host $host;
-          proxy_set_header X-Real-IP $remote_addr;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $scheme;
-        }
-      }
-      NGINX_CONF
-      nginx -g 'daemon off;'"
-    depends_on:
       - frontend
-      - api
-      - assets
-      - http
-      - assist
-    restart: unless-stopped
 
 volumes:
   openreplay-pgdata:
