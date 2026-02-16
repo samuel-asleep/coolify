@@ -1,0 +1,71 @@
+name: Build + Compose + QuickTunnel
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to run on"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Copy env template
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env.development.example .env
+
+      - name: Start app (docker compose)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
+
+      - name: Setup Node.js (includes npm)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install deps + build
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+
+      - name: Stop any container exposing port 5173
+        shell: bash
+        run: |
+          set -euo pipefail
+          IDS="$(docker ps --format '{{.ID}} {{.Ports}}' | grep -E '(:|->)5173' | awk '{print $1}' || true)"
+          if [ -n "${IDS}" ]; then
+            echo "Stopping containers: ${IDS}"
+            docker stop ${IDS}
+          else
+            echo "No running container found exposing port 5173"
+          fi
+
+      - name: Install cloudflared
+        uses: AnimMouse/setup-cloudflared@v3
+
+      - name: Expose localhost:8000 via Cloudflare Quick Tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Starting Quick Tunnel for http://localhost:8000 ..."
+          # Runs in the foreground so the workflow stays alive until you cancel it (or job times out).
+          # The public URL will be printed in logs by cloudflared.
+          cloudflared tunnel --url http://localhost:8000 --no-autoupdate
