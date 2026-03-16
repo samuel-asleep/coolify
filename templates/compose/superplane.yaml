@@ -1,0 +1,119 @@
+# documentation: https://docs.superplane.com
+# slogan: Open source DevOps control plane for event-based workflows.
+# category: devtools
+# tags: devops,workflow,automation,cicd,control-plane,orchestration
+# logo: svgs/superplane.svg
+# port: 3000
+
+services:
+  superplane:
+    image: ghcr.io/superplanehq/superplane:${SUPERPLANE_VERSION:-v0.11.0}
+    depends_on:
+      superplane-keygen:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      - SERVICE_URL_SUPERPLANE_3000
+      - APP_ENV=production
+      - APPLICATION_NAME=superplane
+      - BASE_URL=${SERVICE_FQDN_SUPERPLANE}
+      - WEBHOOKS_BASE_URL=${SERVICE_FQDN_SUPERPLANE}
+      - PUBLIC_API_BASE_PATH=/api/v1
+      - WEB_BASE_PATH=/
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=superplane
+      - DB_USERNAME=postgres
+      - DB_PASSWORD=${SERVICE_PASSWORD_POSTGRES}
+      - POSTGRES_DB_SSL=false
+      - RABBITMQ_URL=amqp://${SERVICE_USER_RABBITMQ:-superplane}:${SERVICE_PASSWORD_RABBITMQ:-superplane}@rabbitmq:5672
+      - SWAGGER_BASE_PATH=/app/api/swagger
+      - RBAC_MODEL_PATH=/app/rbac/rbac_model.conf
+      - RBAC_ORG_POLICY_PATH=/app/rbac/rbac_org_policy.csv
+      - TEMPLATE_DIR=/app/templates
+      - ENCRYPTION_KEY=${SERVICE_HEX_32_ENCRYPTION}
+      - JWT_SECRET=${SERVICE_HEX_32_JWT}
+      - OIDC_KEYS_PATH=/app/oidc-keys
+      - SESSION_SECRET=${SERVICE_HEX_32_SESSION}
+      - NO_ENCRYPTION=no
+      - OWNER_SETUP_ENABLED=yes
+      - ENABLE_PASSWORD_LOGIN=yes
+      - BLOCK_SIGNUP=yes
+      - START_PUBLIC_API=yes
+      - START_INTERNAL_API=yes
+      - START_GRPC_GATEWAY=yes
+      - START_CONSUMERS=yes
+      - START_WEB_SERVER=yes
+      - START_EVENT_DISTRIBUTER=yes
+      - START_EVENT_ROUTER=yes
+      - START_NODE_EXECUTOR=yes
+      - START_NODE_QUEUE_WORKER=yes
+      - START_NODE_REQUEST_WORKER=yes
+      - START_INTEGRATION_REQUEST_WORKER=yes
+      - START_WEBHOOK_PROVISIONER=yes
+      - START_WEBHOOK_CLEANUP_WORKER=yes
+      - START_INTEGRATION_CLEANUP_WORKER=yes
+      - START_CANVAS_CLEANUP_WORKER=yes
+      - SENTRY_DSN=
+      - SENTRY_ENVIRONMENT=single-host
+      - SUPERPLANE_BEACON_ENABLED=yes
+      - SUPERPLANE_INSTALLATION_TYPE=single-host
+      - OTEL_ENABLED=no
+    volumes:
+      - superplane-oidc-keys:/app/oidc-keys
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  superplane-keygen:
+    image: alpine:latest
+    restart: "no"
+    exclude_from_hc: true
+    command:
+      - sh
+      - -c
+      - |
+        apk add --no-cache openssl
+        mkdir -p /oidc-keys
+        if [ -z "$(ls -A /oidc-keys)" ]; then
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /oidc-keys/key.pem
+          chmod 644 /oidc-keys/key.pem
+        fi
+    volumes:
+      - superplane-oidc-keys:/oidc-keys
+
+  db:
+    image: postgres:17
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${SERVICE_PASSWORD_POSTGRES}
+      - POSTGRES_DB=superplane
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - superplane-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.8.17-management-alpine
+    environment:
+      - RABBITMQ_DEFAULT_USER=${SERVICE_USER_RABBITMQ:-superplane}
+      - RABBITMQ_DEFAULT_PASS=${SERVICE_PASSWORD_RABBITMQ:-superplane}
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  superplane-postgres-data:
+  superplane-oidc-keys:
